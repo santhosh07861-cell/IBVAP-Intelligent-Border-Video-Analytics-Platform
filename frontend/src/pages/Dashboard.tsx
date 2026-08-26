@@ -1,21 +1,27 @@
 import React, { useEffect, useState } from 'react';
-import { Camera, AlertOctagon, Bell, Users, Car, ShieldAlert, FileText, ArrowUpRight, Plus } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Camera, AlertOctagon, Bell, Users, FileText, ArrowUpRight, Plus, Shield, Eye } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
 import { useWebSocket } from '../context/WebSocketContext';
 import { useAuth } from '../context/AuthContext';
+import { useCameras } from '../context/CameraContext';
 import { LiveVideoCanvas } from '../components/LiveVideoCanvas';
+import { AlertToastNotification } from '../components/AlertToastNotification';
+import { EvidenceDetailModal } from '../components/EvidenceDetailModal';
 
 export const Dashboard: React.FC = () => {
   const [kpis, setKpis] = useState<any>({
-    cameras_online: 0,
-    cameras_total: 0,
     active_alerts: 0,
     critical_incidents: 0,
     people_detected: 0,
     anpr_events: 0
   });
   const [alerts, setAlerts] = useState<any[]>([]);
-  const { lastMessage } = useWebSocket();
+  const [activeToastAlert, setActiveToastAlert] = useState<any | null>(null);
+  const [selectedEvidence, setSelectedEvidence] = useState<any | null>(null);
+
+  const navigate = useNavigate();
+  const { lastAlert, getCameraTelemetry } = useWebSocket();
+  const { primaryCamera, cameras } = useCameras();
   const { token } = useAuth();
 
   const fetchKpis = async () => {
@@ -58,25 +64,57 @@ export const Dashboard: React.FC = () => {
     const interval = setInterval(() => {
       fetchKpis();
       fetchAlerts();
-    }, 3000);
+    }, 4000);
     return () => clearInterval(interval);
   }, [token]);
 
-  // Handle incoming live alert from WebSocket
+  // Update alerts and show Toast when a new alert WS message arrives
   useEffect(() => {
-    if (lastMessage?.type === 'ALERT_NEW' && lastMessage.alert) {
-      setAlerts(prev => [lastMessage.alert, ...prev.slice(0, 9)]);
+    if (lastAlert) {
+      setAlerts(prev => [lastAlert, ...prev.filter(a => (a.id || a.alert_id) !== (lastAlert.id || lastAlert.alert_id)).slice(0, 9)]);
+      setActiveToastAlert(lastAlert);
       fetchKpis();
     }
-  }, [lastMessage]);
+  }, [lastAlert]);
+
+  const primaryTelemetry = getCameraTelemetry(primaryCamera?.camera_id);
+  const primaryOnline = primaryCamera && (primaryCamera.status === 'ONLINE' || (primaryTelemetry?.fps && primaryTelemetry.fps > 0));
+
+  const totalCameras = cameras.length;
+  const onlineCameras = cameras.filter(c => c.status === 'ONLINE' || (getCameraTelemetry(c.camera_id)?.fps || 0) > 0).length;
 
   return (
     <div className="p-6 space-y-6">
+      {/* Visual Alert Toast */}
+      {activeToastAlert && (
+        <AlertToastNotification
+          alert={activeToastAlert}
+          onClose={() => setActiveToastAlert(null)}
+          onViewEvidence={(al) => {
+            if (al.evidence_url || al.alert?.evidence_url) {
+              setSelectedEvidence(al);
+            } else {
+              navigate('/evidence');
+            }
+          }}
+        />
+      )}
+
+      {/* Evidence Detail Modal */}
+      {selectedEvidence && (
+        <EvidenceDetailModal
+          item={selectedEvidence}
+          onClose={() => setSelectedEvidence(null)}
+        />
+      )}
+
       {/* Top Header Banner */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#111622] p-4 rounded-xl border border-[#252d42]">
         <div>
-          <h2 className="text-lg font-bold tracking-wider text-slate-100 uppercase">BORDER SURVEILLANCE OVERVIEW</h2>
-          <p className="text-xs text-slate-400 font-mono">SECTOR COMMAND - REAL-TIME TELEMETRY & EVENT INTELLIGENCE</p>
+          <h2 className="text-lg font-bold tracking-wider text-slate-100 uppercase flex items-center gap-2 font-mono">
+            <Shield className="w-5 h-5 text-blue-400" /> BORDER SURVEILLANCE OVERVIEW
+          </h2>
+          <p className="text-xs text-slate-400 font-mono">PRIMARY COMMAND FEED & AGGREGATED EVENT INTELLIGENCE</p>
         </div>
         <div className="flex items-center gap-3">
           <Link
@@ -102,7 +140,7 @@ export const Dashboard: React.FC = () => {
             <Camera className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-emerald-400">
-            {kpis?.cameras_online ?? 0} <span className="text-xs text-slate-500 font-normal">/ {kpis?.cameras_total ?? 0}</span>
+            {onlineCameras} <span className="text-xs text-slate-500 font-normal">/ {totalCameras}</span>
           </div>
         </div>
 
@@ -147,31 +185,37 @@ export const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Section: Tactical Live Video Canvas & Live Alerts Feed */}
+      {/* Main Section: Primary Camera Feed & Live Alerts Feed */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Live Surveillance Canvas */}
+        {/* Primary Camera Live Video Canvas ONLY */}
         <div className="lg:col-span-2 bg-[#111622] p-5 rounded-xl border border-[#252d42] flex flex-col justify-between space-y-4">
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-2">
-              <div className={`w-2.5 h-2.5 rounded-full ${lastMessage?.fps && lastMessage.fps > 0 ? 'bg-emerald-500 animate-ping' : 'bg-slate-600'}`} />
+              <div className={`w-2.5 h-2.5 rounded-full ${primaryOnline ? 'bg-emerald-500 animate-ping' : 'bg-slate-600'}`} />
               <h3 className="font-bold text-slate-200 text-sm font-mono">
-                {lastMessage?.fps && lastMessage.fps > 0 ? `PRIMARY SURVEILLANCE FEED - ${lastMessage.camera_id}` : 'PRIMARY SURVEILLANCE FEED'}
+                {primaryCamera ? `PRIMARY CAMERA FEED - ${primaryCamera.name} (${primaryCamera.camera_id})` : 'PRIMARY CAMERA FEED (UNASSIGNED)'}
               </h3>
             </div>
-            <span className={`text-xs font-mono px-2 py-0.5 rounded font-bold ${
-              lastMessage?.fps && lastMessage.fps > 0 ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/30' : 'text-slate-400 bg-slate-800 border border-slate-700'
-            }`}>
-              {lastMessage?.fps && lastMessage.fps > 0 ? `${lastMessage.camera_id} ONLINE` : 'NO STREAM'}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded font-bold text-blue-400 bg-blue-500/10 border border-blue-500/30">
+                ROLE: PRIMARY
+              </span>
+              <span className={`text-xs font-mono px-2 py-0.5 rounded font-bold ${
+                primaryOnline ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/30' : 'text-slate-400 bg-slate-800 border border-slate-700'
+              }`}>
+                {primaryOnline ? 'ONLINE' : 'OFFLINE'}
+              </span>
+            </div>
           </div>
 
           <LiveVideoCanvas
-            cameraId={lastMessage?.fps && lastMessage.fps > 0 ? lastMessage.camera_id : undefined}
-            cameraName={lastMessage?.fps && lastMessage.fps > 0 ? "PRIMARY BORDER FEED" : undefined}
-            detections={lastMessage?.fps && lastMessage.fps > 0 ? (lastMessage.detections || []) : []}
-            fps={lastMessage?.fps && lastMessage.fps > 0 ? lastMessage.fps : 0.0}
-            latencyMs={lastMessage?.fps && lastMessage.fps > 0 ? lastMessage.latency_ms : 0.0}
-            inferenceMode={lastMessage?.fps && lastMessage.fps > 0 ? lastMessage.inference_mode : 'NO ACTIVE STREAM'}
+            cameraId={primaryCamera?.camera_id}
+            cameraName={primaryCamera?.name || "PRIMARY BORDER FEED"}
+            detections={primaryTelemetry?.detections || []}
+            fps={primaryOnline ? (primaryTelemetry?.fps || primaryCamera?.fps || 25.0) : 0.0}
+            latencyMs={primaryTelemetry?.latency_ms || 0.0}
+            inferenceMode={primaryOnline ? (primaryTelemetry?.inference_mode || 'REAL AI | INFERENCE RUNNING') : 'NO ACTIVE STREAM'}
+            cameraRole="primary"
           />
         </div>
 
@@ -190,12 +234,12 @@ export const Dashboard: React.FC = () => {
           <div className="space-y-3 overflow-y-auto max-h-[420px] pr-1">
             {alerts.length === 0 ? (
               <div className="p-8 text-center text-slate-500 font-mono text-xs">
-                No active alerts recorded. Start a stream or trigger an event to monitor live security activity.
+                No active alerts recorded. Connect a stream or start demo control to monitor live security activity.
               </div>
             ) : (
               alerts.map((al) => (
                 <div
-                  key={al.id}
+                  key={al.id || al.alert_id}
                   className={`p-3 rounded-lg border text-xs space-y-1 transition-all ${
                     al.severity === 'CRITICAL'
                       ? 'bg-red-950/40 border-red-500/50 text-red-200'
@@ -212,8 +256,16 @@ export const Dashboard: React.FC = () => {
                       {al.severity} ({al.risk_score}/100)
                     </span>
                   </div>
-                  <div className="text-slate-400 font-mono text-[11px]">
-                    Camera: <strong className="text-blue-400">{al.camera_id}</strong> • Status: <strong>{al.status}</strong>
+                  <div className="text-slate-400 font-mono text-[11px] flex justify-between items-center">
+                    <span>Camera: <strong className="text-blue-400">{al.camera_number || al.camera_id}</strong></span>
+                    {al.evidence_url && (
+                      <button
+                        onClick={() => setSelectedEvidence(al)}
+                        className="text-[10px] text-blue-400 hover:text-blue-300 font-bold flex items-center gap-1 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/30"
+                      >
+                        <Eye className="w-3 h-3" /> EVIDENCE
+                      </button>
+                    )}
                   </div>
                   <div className="text-[10px] text-slate-500 font-mono">
                     {new Date(al.timestamp).toLocaleTimeString()}

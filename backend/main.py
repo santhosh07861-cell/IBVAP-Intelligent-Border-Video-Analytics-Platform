@@ -21,7 +21,8 @@ from backend.auth import get_password_hash
 from backend.routers import (
     auth_router, camera_router, zone_router, alert_router,
     incident_router, anpr_router, face_router, analytics_router,
-    health_router, model_router, audit_router, demo_router
+    health_router, model_router, audit_router, demo_router,
+    evidence_router
 )
 from ai_engine.tracking.tracker import MultiObjectTracker
 
@@ -95,6 +96,8 @@ app.include_router(health_router.router)
 app.include_router(model_router.router)
 app.include_router(audit_router.router)
 app.include_router(demo_router.router)
+app.include_router(evidence_router.router)
+app.include_router(evidence_router.detections_router)
 
 # WebSocket Connection Manager
 class ConnectionManager:

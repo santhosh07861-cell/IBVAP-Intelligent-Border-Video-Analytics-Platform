@@ -5,7 +5,7 @@ from sqlalchemy import func
 
 from database.connection import get_db
 from database.schema import Camera, Alert, Incident, Detection, Event, ANPRResult, AuditLog
-from backend.auth import get_current_user
+from backend.stream_manager import stream_manager
 
 router = APIRouter(prefix="/api/analytics", tags=["Analytics & KPIs"])
 
@@ -18,7 +18,7 @@ def get_kpis(db: Session = Depends(get_db), current_user = Depends(get_current_u
     active_alerts = db.query(Alert).filter(Alert.status.in_(["NEW", "ACKNOWLEDGED"])).count()
     critical_incidents = db.query(Incident).filter(Incident.severity == "CRITICAL", Incident.status != "RESOLVED").count()
 
-    people_detected = db.query(Detection).filter(Detection.class_name == "person").count()
+    people_detected = stream_manager.get_active_confirmed_people_count()
     vehicles_detected = db.query(Detection).filter(Detection.class_name.in_(["car", "truck", "bus", "motorcycle", "van"])).count()
 
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)

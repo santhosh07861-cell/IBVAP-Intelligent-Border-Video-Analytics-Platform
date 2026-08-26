@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { playDangerAlarmSound } from '../utils/alertSound';
 
-interface DetectionMessage {
+export interface DetectionMessage {
   type: string;
   camera_id?: string;
   timestamp?: string;
@@ -20,6 +21,9 @@ interface DetectionMessage {
 
 interface WebSocketContextType {
   lastMessage: DetectionMessage | null;
+  lastAlert: any | null;
+  telemetryMap: Record<string, DetectionMessage>;
+  getCameraTelemetry: (cameraId?: string) => DetectionMessage | null;
   isConnected: boolean;
 }
 
@@ -27,6 +31,8 @@ const WebSocketContext = createContext<WebSocketContextType | undefined>(undefin
 
 export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [lastMessage, setLastMessage] = useState<DetectionMessage | null>(null);
+  const [lastAlert, setLastAlert] = useState<any | null>(null);
+  const [telemetryMap, setTelemetryMap] = useState<Record<string, DetectionMessage>>({});
   const [isConnected, setIsConnected] = useState<boolean>(false);
 
   useEffect(() => {
@@ -51,8 +57,22 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       ws.onmessage = (event) => {
         try {
           if (event.data !== 'pong') {
-            const data = JSON.parse(event.data);
+            const data: DetectionMessage = JSON.parse(event.data);
             setLastMessage(data);
+
+            if (data.type === 'ALERT_NEW') {
+              const alertObj = data.alert || data;
+              setLastAlert(alertObj);
+              playDangerAlarmSound();
+            }
+
+            if (data.type === 'DETECTIONS_UPDATE' && data.camera_id) {
+              const cid = data.camera_id;
+              setTelemetryMap((prev) => ({
+                ...prev,
+                [cid]: data
+              }));
+            }
           }
         } catch (e) {
           // JSON parse skip non-JSON
@@ -78,8 +98,21 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   }, []);
 
+  const getCameraTelemetry = (cameraId?: string): DetectionMessage | null => {
+    if (!cameraId) return null;
+    return telemetryMap[cameraId] || null;
+  };
+
   return (
-    <WebSocketContext.Provider value={{ lastMessage, isConnected }}>
+    <WebSocketContext.Provider
+      value={{
+        lastMessage,
+        lastAlert,
+        telemetryMap,
+        getCameraTelemetry,
+        isConnected
+      }}
+    >
       {children}
     </WebSocketContext.Provider>
   );

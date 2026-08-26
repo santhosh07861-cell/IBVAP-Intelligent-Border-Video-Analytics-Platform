@@ -327,6 +327,7 @@ export const CameraList: React.FC = () => {
                 <th className="p-3">Name</th>
                 <th className="p-3">Location</th>
                 <th className="p-3">Protocol</th>
+                <th className="p-3">Role</th>
                 <th className="p-3">Status</th>
                 <th className="p-3">FPS</th>
                 <th className="p-3">Actions</th>
@@ -341,6 +342,13 @@ export const CameraList: React.FC = () => {
                   <td className="p-3 text-amber-400 font-bold">{c.protocol}</td>
                   <td className="p-3">
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      c.role === 'primary' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}>
+                      {(c.role || 'secondary').toUpperCase()}
+                    </span>
+                  </td>
+                  <td className="p-3">
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                       c.status === 'ONLINE' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
                       c.status === 'CONNECTING' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
                       'bg-slate-800 text-slate-400 border border-slate-700'
@@ -350,6 +358,21 @@ export const CameraList: React.FC = () => {
                   </td>
                   <td className="p-3 text-slate-300">{c.fps}</td>
                   <td className="p-3 flex items-center gap-2">
+                    {c.role !== 'primary' && (
+                      <button
+                        onClick={async () => {
+                          await fetch(`/api/cameras/${c.camera_id}/set-primary`, {
+                            method: 'POST',
+                            headers: getAuthHeaders()
+                          });
+                          fetchCameras();
+                        }}
+                        className="px-2 py-1 bg-blue-950/40 hover:bg-blue-600/30 text-blue-300 border border-blue-800/40 rounded text-[10px] font-semibold transition-colors"
+                        title="Designate as Primary Camera for Dashboard"
+                      >
+                        SET PRIMARY
+                      </button>
+                    )}
                     {c.status === 'ONLINE' || c.status === 'CONNECTING' ? (
                       <button
                         onClick={() => handleStopStream(c.camera_id)}

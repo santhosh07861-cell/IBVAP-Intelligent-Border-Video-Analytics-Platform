@@ -9,6 +9,8 @@ import numpy as np
 from ai_engine.interfaces.detector import InferenceAdapter, DetectionBox
 from ai_engine.detection.drone_detector import DroneDetector
 
+from backend.config import DETECTION_CONFIDENCE_THRESHOLD, NMS_IOU_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
 COCO_CLASSES = [
@@ -32,9 +34,10 @@ class RealAIDetector(InferenceAdapter):
     Runs actual Computer Vision & Deep Learning inference directly on video frame image matrices.
     Returns ZERO detections when room/scene is empty. No fallback or simulated objects.
     """
-    def __init__(self, model_path: str = "storage/models/yolov8n.onnx", conf_threshold: float = 0.38):
+    def __init__(self, model_path: str = "storage/models/yolov8n.onnx", conf_threshold: float = DETECTION_CONFIDENCE_THRESHOLD):
         self.model_path = model_path
         self.conf_threshold = conf_threshold
+        self.nms_iou_threshold = NMS_IOU_THRESHOLD
         self.net = None
         self.device = "CPU"
         self.drone_detector = DroneDetector()
@@ -105,7 +108,7 @@ class RealAIDetector(InferenceAdapter):
                 if boxes:
                     # Apply Non-Maximum Suppression to remove duplicate candidate boxes
                     pixel_boxes = [[int(b[0]*width), int(b[1]*height), int(b[2]*width), int(b[3]*height)] for b in boxes]
-                    indices = cv2.dnn.NMSBoxes(pixel_boxes, confidences, self.conf_threshold, 0.45)
+                    indices = cv2.dnn.NMSBoxes(pixel_boxes, confidences, self.conf_threshold, self.nms_iou_threshold)
                     if len(indices) > 0:
                         indices = indices.flatten() if hasattr(indices, 'flatten') else indices
                         for idx in indices:

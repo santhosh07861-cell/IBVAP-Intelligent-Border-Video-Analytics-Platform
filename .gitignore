@@ -58,6 +58,10 @@ Thumbs.db
 scratch/
 *.pt
 
+# Environment & Secrets
+.env
+.env.local
+
 # Storage uploads / temporary snapshot evidence (keep folder structure)
 storage/uploads/*
 storage/evidence/snapshots/*

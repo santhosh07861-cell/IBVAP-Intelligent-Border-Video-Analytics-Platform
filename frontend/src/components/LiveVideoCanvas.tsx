@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, Eye, Moon, Sun, ShieldAlert, Cpu } from 'lucide-react';
+import { Eye, Moon, Bug } from 'lucide-react';
 
 interface LiveVideoCanvasProps {
   cameraId?: string;
@@ -15,6 +15,7 @@ interface LiveVideoCanvasProps {
   fps?: number;
   latencyMs?: number;
   inferenceMode?: string;
+  cameraRole?: 'primary' | 'secondary';
 }
 
 export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
@@ -23,13 +24,20 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
   detections = [],
   fps = 0.0,
   latencyMs = 0.0,
-  inferenceMode
+  inferenceMode,
+  cameraRole
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [thermalMode, setThermalMode] = useState<boolean>(false);
   const [nightVision, setNightVision] = useState<boolean>(false);
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
+  const [imageError, setImageError] = useState<boolean>(false);
 
-  const isStreaming = fps > 0;
+  const isStreaming = Boolean(cameraId && !imageError);
+
+  useEffect(() => {
+    setImageError(false);
+  }, [cameraId]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -45,9 +53,8 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       const w = canvas.width;
       const h = canvas.height;
 
-      // 1. Render Background Surveillance Terrain
+      // 1. Render Background Surveillance Terrain when thermal or night mode active
       if (isStreaming && thermalMode) {
-        // Thermal Infrared Mode Palette
         const grad = ctx.createLinearGradient(0, 0, 0, h);
         grad.addColorStop(0, '#0a0314');
         grad.addColorStop(0.5, '#19082b');
@@ -69,7 +76,6 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
         ctx.fill();
         ctx.stroke();
       } else if (isStreaming && nightVision) {
-        // Night Vision Green Palette
         const grad = ctx.createLinearGradient(0, 0, 0, h);
         grad.addColorStop(0, '#021208');
         grad.addColorStop(0.5, '#04220f');
@@ -95,7 +101,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
           ctx.stroke();
         }
       } else {
-        // Standard Mode - Clear canvas to reveal underlying live video stream
+        // Clear canvas overlay to reveal underlying live JPEG stream
         ctx.clearRect(0, 0, w, h);
         if (!isStreaming) {
           const grad = ctx.createLinearGradient(0, 0, 0, h);
@@ -106,7 +112,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
         }
       }
 
-      // 2. Render Tactical Scan Lines & Crosshairs (Only when streaming)
+      // 2. Tactical Scan Lines & Crosshairs (Only when streaming)
       if (isStreaming) {
         ctx.strokeStyle = nightVision ? 'rgba(16, 185, 129, 0.15)' : 'rgba(59, 130, 246, 0.15)';
         ctx.lineWidth = 1;
@@ -128,7 +134,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
         ctx.stroke();
       }
 
-      // 3. Render Polygon Virtual Fence Zone ONLY when streaming is active
+      // 3. Polygon Virtual Fence Zone Overlay
       if (isStreaming) {
         ctx.save();
         ctx.beginPath();
@@ -150,23 +156,23 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
         ctx.restore();
       }
 
-      // 4. Render Dynamic Bounding Boxes & Inactive Overlay State
+      // 4. Render Dynamic Bounding Boxes & Inactive Card State
       const activeDets = detections || [];
 
       if (!isStreaming) {
         ctx.save();
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
-        ctx.fillRect(w * 0.25, h * 0.38, w * 0.50, h * 0.24);
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+        ctx.fillRect(w * 0.20, h * 0.35, w * 0.60, h * 0.30);
         ctx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
-        ctx.strokeRect(w * 0.25, h * 0.38, w * 0.50, h * 0.24);
+        ctx.strokeRect(w * 0.20, h * 0.35, w * 0.60, h * 0.30);
 
         ctx.fillStyle = '#94a3b8';
         ctx.font = 'bold 15px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('NO ACTIVE VIDEO SOURCE', w / 2, h * 0.47);
+        ctx.fillText('NO ACTIVE VIDEO SOURCE', w / 2, h * 0.46);
         ctx.font = '11px monospace';
         ctx.fillStyle = '#64748b';
-        ctx.fillText('Connect a camera or start a demo video source in Demo Control.', w / 2, h * 0.53);
+        ctx.fillText('Start this camera stream in Camera Management or Demo Control.', w / 2, h * 0.54);
         ctx.restore();
       }
 
@@ -204,9 +210,9 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
 
       // 5. Render Camera Status & Telemetry Header
       ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-      ctx.fillRect(10, 10, 360, 36);
+      ctx.fillRect(10, 10, 380, 36);
       ctx.strokeStyle = 'rgba(59, 130, 246, 0.4)';
-      ctx.strokeRect(10, 10, 360, 36);
+      ctx.strokeRect(10, 10, 380, 36);
 
       ctx.fillStyle = isStreaming ? (nightVision ? '#10b981' : '#38bdf8') : '#64748b';
       ctx.font = 'bold 11px monospace';
@@ -217,7 +223,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       ctx.fillStyle = '#94a3b8';
       ctx.font = '10px monospace';
       ctx.fillText(
-        isStreaming ? `TIME: ${new Date().toISOString().replace('T', ' ').substring(0, 19)} UTC` : 'TIME: STREAM INACTIVE',
+        isStreaming ? `ROLE: ${(cameraRole || 'CAMERA').toUpperCase()} | TIME: ${new Date().toISOString().substring(11, 19)} UTC` : 'STREAM INACTIVE',
         20, 39
       );
 
@@ -229,19 +235,16 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
     return () => {
       cancelAnimationFrame(animFrameId);
     };
-  }, [thermalMode, nightVision, detections, isStreaming]);
+  }, [thermalMode, nightVision, detections, isStreaming, cameraId, cameraName, cameraRole]);
 
   return (
     <div className="relative aspect-video bg-slate-950 rounded-lg overflow-hidden border border-[#252d42] group">
-      {isStreaming && cameraId && (
+      {cameraId && !imageError && (
         <img
           src={`/api/cameras/${cameraId}/stream`}
-          alt="Live Camera Feed"
+          alt="Live Camera Stream"
           className="absolute inset-0 w-full h-full object-cover pointer-events-none"
-          onError={(e) => {
-            // Hide image fallback if stream endpoint unavailable
-            (e.target as HTMLElement).style.display = 'none';
-          }}
+          onError={() => setImageError(true)}
         />
       )}
       <canvas
@@ -251,40 +254,65 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
         className="relative z-10 w-full h-full object-cover"
       />
 
+      {/* Development Diagnostics Overlay */}
+      {showDiagnostics && (
+        <div className="absolute top-12 left-3 z-20 bg-slate-950/90 border border-amber-500/40 p-2.5 rounded text-[10px] font-mono text-amber-300 space-y-1 backdrop-blur max-w-xs shadow-xl">
+          <div className="font-bold border-b border-amber-500/30 pb-1 flex justify-between">
+            <span>DEV DIAGNOSTICS</span>
+            <span className="text-slate-400">{cameraId}</span>
+          </div>
+          <div>Role: <strong>{cameraRole || 'secondary'}</strong></div>
+          <div>Status: <strong>{isStreaming ? 'STREAMING' : 'OFFLINE'}</strong></div>
+          <div>Video FPS: <strong>{fps}</strong></div>
+          <div>AI Latency: <strong>{latencyMs}ms</strong></div>
+          <div>Objects Tracked: <strong>{detections.length}</strong></div>
+          <div>Inference: <strong>{inferenceMode || 'N/A'}</strong></div>
+        </div>
+      )}
+
       {/* Control Overlay Buttons */}
-      <div className="absolute top-3 right-3 flex items-center gap-2 bg-slate-900/80 backdrop-blur p-1 rounded-lg border border-[#252d42] opacity-90 group-hover:opacity-100 transition-opacity">
+      <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/80 backdrop-blur p-1 rounded-lg border border-[#252d42] opacity-90 group-hover:opacity-100 transition-opacity z-20">
+        <button
+          onClick={() => setShowDiagnostics(!showDiagnostics)}
+          className={`p-1 rounded text-[11px] font-mono font-bold flex items-center gap-1 transition-colors ${
+            showDiagnostics ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-white'
+          }`}
+          title="Toggle Development Diagnostics"
+        >
+          <Bug className="w-3.5 h-3.5" />
+        </button>
         <button
           onClick={() => { if (isStreaming) { setNightVision(!nightVision); setThermalMode(false); } }}
           disabled={!isStreaming}
-          className={`px-2.5 py-1 rounded text-[11px] font-mono font-bold flex items-center gap-1 transition-colors ${
+          className={`px-2 py-1 rounded text-[10px] font-mono font-bold flex items-center gap-1 transition-colors ${
             !isStreaming
               ? 'opacity-40 cursor-not-allowed text-slate-500 bg-slate-800'
               : nightVision
               ? 'bg-emerald-600 text-white'
               : 'text-slate-400 hover:text-white'
           }`}
-          title={isStreaming ? "Toggle Night Vision Mode" : "No active video stream"}
+          title="Toggle Night Vision Mode"
         >
-          <Moon className="w-3.5 h-3.5" /> NIGHT VISION
+          <Moon className="w-3 h-3" /> NIGHT
         </button>
         <button
           onClick={() => { if (isStreaming) { setThermalMode(!thermalMode); setNightVision(false); } }}
           disabled={!isStreaming}
-          className={`px-2.5 py-1 rounded text-[11px] font-mono font-bold flex items-center gap-1 transition-colors ${
+          className={`px-2 py-1 rounded text-[10px] font-mono font-bold flex items-center gap-1 transition-colors ${
             !isStreaming
               ? 'opacity-40 cursor-not-allowed text-slate-500 bg-slate-800'
               : thermalMode
               ? 'bg-purple-600 text-white'
               : 'text-slate-400 hover:text-white'
           }`}
-          title={isStreaming ? "Toggle Thermal Infrared Mode" : "No active video stream"}
+          title="Toggle Thermal Infrared Mode"
         >
-          <Eye className="w-3.5 h-3.5" /> THERMAL IR
+          <Eye className="w-3 h-3" /> THERMAL
         </button>
       </div>
 
       {/* Footer Telemetry */}
-      <div className="absolute bottom-0 left-0 right-0 p-2.5 bg-slate-950/90 border-t border-[#252d42] flex items-center justify-between text-[11px] text-slate-400 font-mono">
+      <div className="absolute bottom-0 left-0 right-0 p-2.5 bg-slate-950/90 border-t border-[#252d42] flex items-center justify-between text-[11px] text-slate-400 font-mono z-20">
         <div className="flex items-center gap-3">
           <span>FPS: <strong className={isStreaming ? 'text-emerald-400' : 'text-slate-500'}>{isStreaming ? fps : 0}</strong></span>
           <span>LATENCY: <strong className={isStreaming ? 'text-blue-400' : 'text-slate-500'}>{isStreaming ? `${latencyMs}ms` : 'N/A'}</strong></span>

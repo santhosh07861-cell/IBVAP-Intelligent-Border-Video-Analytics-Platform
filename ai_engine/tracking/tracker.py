@@ -3,6 +3,8 @@ from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import pydantic
 
+from backend.config import TRACK_CONFIRMATION_FRAMES, TRACK_MAX_DISAPPEARED
+
 class TrackedObject(pydantic.BaseModel):
     track_id: int
     camera_id: str
@@ -14,15 +16,18 @@ class TrackedObject(pydantic.BaseModel):
     last_seen: datetime
     dwell_time_sec: float
     trajectory: List[Tuple[float, float, str]]  # list of (center_x, center_y, iso_timestamp)
+    hits: int = 1
+    is_confirmed: bool = False
     is_fallback: bool = False
 
 class MultiObjectTracker:
-    def __init__(self, max_disappeared: int = 30, max_distance: float = 0.15):
+    def __init__(self, max_disappeared: int = TRACK_MAX_DISAPPEARED, max_distance: float = 0.15, confirmation_frames: int = TRACK_CONFIRMATION_FRAMES):
         self.next_track_id = 101
         self.tracks: Dict[int, TrackedObject] = {}
         self.disappeared: Dict[int, int] = {}
         self.max_disappeared = max_disappeared
         self.max_distance = max_distance
+        self.confirmation_frames = confirmation_frames
 
     def update(self, camera_id: str, raw_detections: List[dict]) -> List[TrackedObject]:
         now = datetime.utcnow()
@@ -93,6 +98,10 @@ class MultiObjectTracker:
                     track.center = (cx, cy)
                     track.last_seen = now
                     track.dwell_time_sec = round((now - track.entry_time).total_seconds(), 1)
+                    track.hits += 1
+                    if track.hits >= self.confirmation_frames:
+                        track.is_confirmed = True
+
                     track.trajectory.append((round(cx, 3), round(cy, 3), now_str))
                     if len(track.trajectory) > 50:
                         track.trajectory = track.trajectory[-50:]
@@ -127,6 +136,7 @@ class MultiObjectTracker:
         self.next_track_id += 1
 
         now_str = now.isoformat()
+        is_conf = (1 >= self.confirmation_frames)
         track = TrackedObject(
             track_id=tid,
             camera_id=camera_id,
@@ -138,6 +148,8 @@ class MultiObjectTracker:
             last_seen=now,
             dwell_time_sec=0.0,
             trajectory=[(round(center[0], 3), round(center[1], 3), now_str)],
+            hits=1,
+            is_confirmed=is_conf,
             is_fallback=is_fallback
         )
         self.tracks[tid] = track

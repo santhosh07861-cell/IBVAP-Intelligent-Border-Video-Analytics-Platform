@@ -47,6 +47,7 @@ class Camera(Base):
     longitude = Column(Float, default=70.9025)
     stream_url = Column(String(500), nullable=False)
     protocol = Column(String(20), default="MP4")  # RTSP, WEBCAM, MP4, ONVIF
+    role = Column(String(20), default="secondary")  # primary, secondary
     status = Column(String(20), default="OFFLINE")  # ONLINE, OFFLINE, CONNECTING, DEGRADED, ERROR
     fps = Column(Float, default=0.0)
     resolution = Column(String(20), default="1920x1080")

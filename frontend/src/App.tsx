@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { WebSocketProvider } from './context/WebSocketContext';
+import { CameraProvider } from './context/CameraContext';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 
@@ -20,6 +21,7 @@ import { HealthView } from './pages/HealthView';
 import { ModelRegistryView } from './pages/ModelRegistryView';
 import { AuditView } from './pages/AuditView';
 import { DemoControl } from './pages/DemoControl';
+import { EvidenceGallery } from './pages/EvidenceGallery';
 
 const ProtectedLayout: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -41,6 +43,8 @@ const ProtectedLayout: React.FC = () => {
             <Route path="/alerts" element={<AlertList />} />
             <Route path="/incidents" element={<IncidentList />} />
             <Route path="/incidents/:id" element={<IncidentDetail />} />
+            <Route path="/evidence" element={<EvidenceGallery />} />
+            <Route path="/detections" element={<EvidenceGallery />} />
             <Route path="/anpr" element={<ANPRView />} />
             <Route path="/faces" element={<FaceView />} />
             <Route path="/analytics" element={<Analytics />} />
@@ -60,14 +64,16 @@ const ProtectedLayout: React.FC = () => {
 export const App: React.FC = () => {
   return (
     <AuthProvider>
-      <WebSocketProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/*" element={<ProtectedLayout />} />
-          </Routes>
-        </BrowserRouter>
-      </WebSocketProvider>
+      <CameraProvider>
+        <WebSocketProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route path="/*" element={<ProtectedLayout />} />
+            </Routes>
+          </BrowserRouter>
+        </WebSocketProvider>
+      </CameraProvider>
     </AuthProvider>
   );
 };

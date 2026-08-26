@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 
 # Primary Live Operational Database URL (Default: PostgreSQL)
 DEFAULT_PG_URL = "postgresql://postgres:postgres@localhost:5432/ibvap"
+DEFAULT_SQLITE_URL = "sqlite:///./ibvap.db"
+
 DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_PG_URL)
 
 # Fallback to local OS user if default postgres role requires alternate socket
@@ -31,42 +33,48 @@ try:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     
-    logger.info("DATABASE ENGINE: PostgreSQL")
-    logger.info("DATABASE HOST: localhost")
-    logger.info("DATABASE NAME: ibvap")
+    db_engine_name = "SQLite" if DATABASE_URL.startswith("sqlite") else "PostgreSQL"
+    logger.info(f"DATABASE ENGINE: {db_engine_name}")
     logger.info("DATABASE STATUS: CONNECTED")
-    print("DATABASE ENGINE: PostgreSQL")
-    print("DATABASE HOST: localhost")
-    print("DATABASE NAME: ibvap")
+    print(f"DATABASE ENGINE: {db_engine_name}")
     print("DATABASE STATUS: CONNECTED")
 
 except Exception as err:
-    # Try alternative local user socket before declaring failure
-    try:
-        engine = create_engine(
-            alt_url,
-            connect_args=connect_args,
-            poolclass=NullPool,
-            echo=False
-        )
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        logger.info("DATABASE ENGINE: PostgreSQL")
-        logger.info("DATABASE HOST: localhost")
-        logger.info("DATABASE NAME: ibvap")
-        logger.info("DATABASE STATUS: CONNECTED")
-        print("DATABASE ENGINE: PostgreSQL")
-        print("DATABASE HOST: localhost")
-        print("DATABASE NAME: ibvap")
-        print("DATABASE STATUS: CONNECTED")
-        DATABASE_URL = alt_url
-    except Exception as err2:
-        logger.error(f"DATABASE STATUS: DISCONNECTED - PostgreSQL connection failed: {err2}")
-        print("DATABASE ENGINE: PostgreSQL")
-        print("DATABASE HOST: localhost")
-        print("DATABASE NAME: ibvap")
-        print(f"DATABASE STATUS: DISCONNECTED ({err2})")
-        raise RuntimeError(f"DATABASE: DISCONNECTED - PostgreSQL connection failed ({err2}). Live SQLite fallback is disabled.")
+    if not DATABASE_URL.startswith("sqlite"):
+        # Try alternative local user socket before falling back to SQLite
+        try:
+            engine = create_engine(
+                alt_url,
+                connect_args={},
+                poolclass=NullPool,
+                echo=False
+            )
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("DATABASE ENGINE: PostgreSQL")
+            logger.info("DATABASE STATUS: CONNECTED")
+            print("DATABASE ENGINE: PostgreSQL")
+            print("DATABASE STATUS: CONNECTED")
+            DATABASE_URL = alt_url
+        except Exception as err2:
+            logger.warning(f"PostgreSQL connection failed ({err2}). Falling back to SQLite.")
+            print(f"DATABASE WARNING: PostgreSQL failed ({err2}). Falling back to SQLite database ({DEFAULT_SQLITE_URL}).")
+            DATABASE_URL = DEFAULT_SQLITE_URL
+            engine = create_engine(
+                DATABASE_URL,
+                connect_args={"check_same_thread": False, "timeout": 30},
+                poolclass=NullPool,
+                echo=False
+            )
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("DATABASE ENGINE: SQLite (Fallback)")
+            logger.info("DATABASE STATUS: CONNECTED")
+            print("DATABASE ENGINE: SQLite (Fallback)")
+            print("DATABASE STATUS: CONNECTED")
+    else:
+        logger.error(f"SQLite connection failed: {err}")
+        raise err
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

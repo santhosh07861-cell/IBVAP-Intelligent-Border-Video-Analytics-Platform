@@ -1,14 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Radio, Activity, User, LogOut, Cpu, AlertTriangle } from 'lucide-react';
+import { Shield, Radio, Activity, User, LogOut, Cpu, AlertTriangle, Volume2, VolumeX } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../context/WebSocketContext';
 import { Link, useNavigate } from 'react-router-dom';
+import { isAlarmMuted, toggleAlarmMute } from '../utils/alertSound';
 
 export const Navbar: React.FC = () => {
   const { user, logout } = useAuth();
   const { isConnected, lastMessage } = useWebSocket();
   const navigate = useNavigate();
   const [timeStr, setTimeStr] = useState<string>('');
+  const [muted, setMuted] = useState<boolean>(isAlarmMuted());
 
   useEffect(() => {
     const updateTime = () => {
@@ -19,6 +21,11 @@ export const Navbar: React.FC = () => {
     const timer = setInterval(updateTime, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  const handleToggleMute = () => {
+    const newMuted = toggleAlarmMute();
+    setMuted(newMuted);
+  };
 
   const inferenceMode = lastMessage?.inference_mode || "REAL AI | INFERENCE RUNNING";
 
@@ -59,6 +66,20 @@ export const Navbar: React.FC = () => {
             {inferenceMode}
           </span>
         </div>
+
+        <div className="h-4 w-px bg-[#252d42]" />
+
+        {/* Alarm Sound Toggle */}
+        <button
+          onClick={handleToggleMute}
+          title={muted ? "Unmute Security Alarm" : "Mute Security Alarm"}
+          className={`flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-mono transition-colors border ${
+            muted ? 'bg-slate-800 text-slate-400 border-slate-700' : 'bg-red-950/60 text-red-400 border-red-800/60'
+          }`}
+        >
+          {muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 animate-pulse" />}
+          <span>{muted ? 'ALARM MUTED' : 'ALARM ON'}</span>
+        </button>
 
         <div className="h-4 w-px bg-[#252d42]" />
 

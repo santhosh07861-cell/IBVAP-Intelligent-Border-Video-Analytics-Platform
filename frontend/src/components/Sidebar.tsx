@@ -4,7 +4,7 @@ import { useWebSocket } from '../context/WebSocketContext';
 import {
   LayoutDashboard, Video, Camera, Shapes, Bell, AlertOctagon,
   FileText, UserCheck, BarChart3, Activity, HeartPulse, Cpu,
-  ShieldCheck, PlaySquare
+  ShieldCheck, PlaySquare, Scan
 } from 'lucide-react';
 
 const navItems = [
@@ -14,6 +14,7 @@ const navItems = [
   { path: '/zones', label: 'Virtual Fences', icon: Shapes },
   { path: '/alerts', label: 'Live Alerts', icon: Bell },
   { path: '/incidents', label: 'Incidents', icon: AlertOctagon },
+  { path: '/evidence', label: 'AI Detection History', icon: Scan },
   { path: '/anpr', label: 'ANPR License Plates', icon: FileText },
   { path: '/faces', label: 'Face Detections', icon: UserCheck },
   { path: '/analytics', label: 'Border Analytics', icon: BarChart3 },
@@ -29,11 +30,16 @@ export const Sidebar: React.FC = () => {
   const { isConnected, lastMessage } = useWebSocket();
 
   React.useEffect(() => {
-    fetch('/api/analytics/kpis')
-      .then(res => res.json())
-      .then(data => setKpis(data))
-      .catch(() => setKpis(null));
-  }, [lastMessage]);
+    const fetchKpis = () => {
+      fetch('/api/analytics/kpis')
+        .then(res => res.json())
+        .then(data => setKpis(data))
+        .catch(() => setKpis(null));
+    };
+    fetchKpis();
+    const interval = setInterval(fetchKpis, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const getSystemStatus = () => {
     if (!isConnected) return { text: 'DISCONNECTED', color: 'text-red-400' };

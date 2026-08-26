@@ -27,6 +27,7 @@ class CameraCreate(BaseModel):
     longitude: float = 70.9025
     stream_url: str
     protocol: str = "MP4"  # RTSP, WEBCAM, MP4, ONVIF
+    role: Optional[str] = "secondary"  # primary, secondary
     is_demo: bool = False
 
 class CameraResponse(BaseModel):
@@ -40,6 +41,7 @@ class CameraResponse(BaseModel):
     latitude: Optional[float] = 26.9124
     longitude: Optional[float] = 70.9025
     protocol: Optional[str] = "MP4"
+    role: Optional[str] = "secondary"
     status: Optional[str] = "OFFLINE"
     fps: Optional[float] = 0.0
     resolution: Optional[str] = "1920x1080"
@@ -53,6 +55,14 @@ class TestConnectionRequest(BaseModel):
 @router.get("", response_model=List[CameraResponse])
 def list_cameras(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     cameras = db.query(Camera).all()
+
+    # Ensure exactly one Primary camera exists if any cameras are registered
+    if cameras:
+        has_primary = any(c.role == "primary" for c in cameras)
+        if not has_primary:
+            cameras[0].role = "primary"
+            db.commit()
+
     return cameras
 
 @router.get("/{camera_id}", response_model=CameraResponse)
@@ -298,6 +308,25 @@ def stop_camera(camera_id: str, db: Session = Depends(get_db), current_user = De
         "camera_id": cam.camera_id
     }
 
+@router.post("/{camera_id}/set-primary", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def set_primary_camera(camera_id: str, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    target = db.query(Camera).filter((Camera.id == camera_id) | (Camera.camera_id == camera_id)).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    # Demote all existing cameras to secondary
+    db.query(Camera).update({Camera.role: "secondary"})
+    target.role = "primary"
+    db.commit()
+    db.refresh(target)
+
+    return {
+        "status": "success",
+        "message": f"Camera {target.camera_id} set as PRIMARY camera.",
+        "camera_id": target.camera_id,
+        "role": target.role
+    }
+
 @router.delete("/{camera_id}", dependencies=[Depends(RequireRole(["Administrator"]))])
 def delete_camera(camera_id: str, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     cam = db.query(Camera).filter((Camera.id == camera_id) | (Camera.camera_id == camera_id)).first()
@@ -312,25 +341,58 @@ def delete_camera(camera_id: str, db: Session = Depends(get_db), current_user = 
 
     return {"status": "success", "message": f"Camera {camera_id} deleted successfully."}
 
+@router.post("/{camera_id}/subscribe")
+def subscribe_camera(camera_id: str, client_id: Optional[str] = "ui_client"):
+    from backend.main import manager as ws_manager
+    from backend.stream_manager import stream_manager
+    sub_id = f"{client_id}_{uuid.uuid4().hex[:4]}"
+    stream_manager.subscribe(camera_id, sub_id, ws_manager)
+    return {
+        "status": "success",
+        "camera_id": camera_id,
+        "subscription_id": sub_id,
+        "active_subscribers": stream_manager.get_subscriber_count(camera_id)
+    }
+
+@router.post("/{camera_id}/unsubscribe")
+def unsubscribe_camera(camera_id: str, subscription_id: str):
+    from backend.stream_manager import stream_manager
+    stream_manager.unsubscribe(camera_id, subscription_id)
+    return {
+        "status": "success",
+        "camera_id": camera_id,
+        "subscription_id": subscription_id,
+        "active_subscribers": stream_manager.get_subscriber_count(camera_id)
+    }
+
 from fastapi.responses import StreamingResponse
 
 @router.get("/{camera_id}/stream")
 def get_camera_stream(camera_id: str):
     """
-    Streams real-time MJPEG video frames from active StreamWorker for the specified camera.
+    Streams real-time MJPEG video frames from active StreamWorker with automatic subscription lifecycle tracking.
     """
+    from backend.main import manager as ws_manager
     from backend.stream_manager import stream_manager
     cid = camera_id
+    sub_id = f"mjpeg_stream_{uuid.uuid4().hex[:6]}"
+
+    # Automatically subscribe on connection
+    stream_manager.subscribe(cid, sub_id, ws_manager)
 
     def frame_generator():
-        while True:
-            worker = stream_manager.workers.get(cid)
-            if worker and worker.is_running:
-                jpeg_bytes = worker.get_latest_jpeg()
-                if jpeg_bytes:
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
-            time.sleep(0.04)
+        try:
+            while True:
+                worker = stream_manager.workers.get(cid)
+                if worker and worker.is_running:
+                    jpeg_bytes = worker.get_latest_jpeg()
+                    if jpeg_bytes:
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
+                time.sleep(0.04)
+        finally:
+            # Automatically unsubscribe when HTTP stream connection drops
+            stream_manager.unsubscribe(cid, sub_id)
 
     return StreamingResponse(frame_generator(), media_type="multipart/x-mixed-replace; boundary=frame")
 
