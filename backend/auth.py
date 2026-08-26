@@ -59,11 +59,24 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 class RequireRole:
     def __init__(self, allowed_roles: List[str]):
-        self.allowed_roles = allowed_roles
+        self.allowed_roles = [r.upper() for r in allowed_roles]
 
     def __call__(self, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-        role_name = current_user.role.name if current_user.role else "Viewer"
-        if role_name not in self.allowed_roles and role_name != "Administrator":
+        role_name = (current_user.role.name if current_user.role else "VIEWER").upper()
+        # Admin / Administrator role always has full system permissions
+        if role_name in ["ADMIN", "ADMINISTRATOR"]:
+            return current_user
+
+        # Match against normalized allowed roles
+        normalized_allowed = []
+        for r in self.allowed_roles:
+            normalized_allowed.append(r)
+            if r == "SECURITY OPERATOR": normalized_allowed.append("OPERATOR")
+            if r == "OPERATOR": normalized_allowed.append("SECURITY OPERATOR")
+            if r == "ADMINISTRATOR": normalized_allowed.append("ADMIN")
+            if r == "ADMIN": normalized_allowed.append("ADMINISTRATOR")
+
+        if role_name not in normalized_allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Role '{role_name}' does not have sufficient permissions. Required: {self.allowed_roles}"
