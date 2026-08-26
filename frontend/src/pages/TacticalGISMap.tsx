@@ -344,10 +344,11 @@ export const TacticalGISMap: React.FC = () => {
             scrollWheelZoom={true}
             style={{ width: '100%', height: '100%', background: '#0a0d14' }}
           >
-            {/* CartoDB Dark Matter Basemap */}
+            {/* OpenStreetMap Tactical Dark Matter Basemap */}
             <TileLayer
-              url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-              attribution='&copy; <a href="https://carto.com/">CARTO</a> | IBVAP Tactical GIS'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              className="tactical-dark-tiles"
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> | IBVAP Tactical GIS'
               maxZoom={19}
             />
 

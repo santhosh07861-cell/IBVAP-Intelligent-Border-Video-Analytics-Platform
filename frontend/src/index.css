@@ -34,3 +34,8 @@
   );
   background-size: 100% 4px;
 }
+
+/* Tactical Dark Invert Filter for Leaflet Tiles */
+.tactical-dark-tiles {
+  filter: brightness(0.65) invert(1) contrast(2.2) hue-rotate(200deg) saturate(0.4) !important;
+}
