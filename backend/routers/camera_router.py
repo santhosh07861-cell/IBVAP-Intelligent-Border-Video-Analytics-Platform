@@ -74,15 +74,25 @@ def get_camera(camera_id: str, db: Session = Depends(get_db), current_user = Dep
 
 @router.post("", response_model=CameraResponse, dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
 def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    existing = db.query(Camera).filter(Camera.camera_id == payload.camera_id).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Camera ID already exists")
-
     stream_url = payload.stream_url.strip()
     if stream_url.startswith("htpp://"): stream_url = "http://" + stream_url[7:]
     elif stream_url.startswith("htp://"): stream_url = "http://" + stream_url[6:]
     if (stream_url.startswith("http://") or stream_url.startswith("https://")) and not any(stream_url.endswith(x) for x in ["/video", "/shot.jpg", ".mp4", "/mjpeg"]):
         stream_url = stream_url.rstrip("/") + "/video"
+
+    existing = db.query(Camera).filter(Camera.camera_id == payload.camera_id).first()
+    if existing:
+        existing.name = payload.name
+        existing.description = payload.description
+        existing.location = payload.location
+        existing.latitude = payload.latitude
+        existing.longitude = payload.longitude
+        existing.stream_url = stream_url
+        existing.protocol = payload.protocol.upper()
+        existing.is_demo = payload.is_demo
+        db.commit()
+        db.refresh(existing)
+        return existing
 
     cam = Camera(
         id=str(uuid.uuid4()),

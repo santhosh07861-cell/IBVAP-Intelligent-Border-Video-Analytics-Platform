@@ -115,10 +115,13 @@ export const CameraList: React.FC = () => {
     }
   };
 
+  const [submitting, setSubmitting] = useState(false);
+
   const handleWebcamPermissionAndSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setWebcamStatus(null);
+    setSubmitting(true);
 
     const cid = form.camera_id || `CAM-${Date.now().toString().slice(-4)}`;
     const camName = form.name || `Camera ${cid}`;
@@ -131,6 +134,7 @@ export const CameraList: React.FC = () => {
     if (form.protocol === 'WEBCAM') {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setErrorMessage('NO CAMERA DEVICE FOUND / Browser mediaDevices API not supported.');
+        setSubmitting(false);
         return;
       }
 
@@ -149,6 +153,7 @@ export const CameraList: React.FC = () => {
         } else {
           setErrorMessage(`Webcam Error: ${err.message || 'Unable to access camera.'}`);
         }
+        setSubmitting(false);
         return;
       }
     }
@@ -191,6 +196,7 @@ export const CameraList: React.FC = () => {
           errDetail = 'SESSION EXPIRED: Your login session timed out. Please click the Logout icon (top-right) and log back in as admin.';
         }
         setErrorMessage(errDetail);
+        setSubmitting(false);
         return;
       }
 
@@ -209,6 +215,7 @@ export const CameraList: React.FC = () => {
         } catch(jsonErr) {}
         setErrorMessage(`CANNOT CONNECT TO STREAM: ${startErr}`);
         fetchCameras();
+        setSubmitting(false);
         return; // Keep modal open so user sees exact error message!
       }
 
@@ -216,6 +223,8 @@ export const CameraList: React.FC = () => {
       fetchCameras();
     } catch (err: any) {
       setErrorMessage(err.message || 'Error initializing camera.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -656,10 +665,20 @@ export const CameraList: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold uppercase tracking-wider transition-colors flex items-center gap-1.5 shadow-lg shadow-blue-600/20"
+                  disabled={submitting}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 text-white rounded font-bold uppercase tracking-wider transition-colors flex items-center gap-1.5 shadow-lg shadow-blue-600/20 disabled:opacity-60"
                 >
-                  <Play className="w-4 h-4 fill-current" />
-                  {form.protocol === 'WEBCAM' ? 'START CAMERA & CONNECT' : form.protocol === 'RTSP' ? 'SAVE & CONNECT RTSP' : 'START VIDEO & SAVE'}
+                  {submitting ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>CONNECTING & SAVING STREAM...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 fill-current" />
+                      <span>{form.protocol === 'WEBCAM' ? 'START CAMERA & CONNECT' : form.protocol === 'RTSP' ? 'SAVE & CONNECT RTSP' : 'START VIDEO & SAVE'}</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
