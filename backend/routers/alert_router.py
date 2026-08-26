@@ -42,3 +42,27 @@ def acknowledge_alert(alert_id: str, db: Session = Depends(get_db), current_user
     db.commit()
 
     return {"status": "success", "alert_id": alert_id, "alert_status": alert.status}
+
+@router.put("/{alert_id}/resolve", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def resolve_alert(alert_id: str, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    alert.status = "RESOLVED"
+
+    audit = AuditLog(username=current_user.username, action="RESOLVE_ALERT", resource="alerts", details={"alert_id": alert_id})
+    db.add(audit)
+    db.commit()
+
+    return {"status": "success", "alert_id": alert_id, "alert_status": alert.status}
+
+@router.post("/resolve-all", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def resolve_all_alerts(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    updated_count = db.query(Alert).filter(Alert.status.in_(["NEW", "ACKNOWLEDGED"])).update({Alert.status: "RESOLVED"}, synchronize_session=False)
+
+    audit = AuditLog(username=current_user.username, action="RESOLVE_ALL_ALERTS", resource="alerts", details={"resolved_count": updated_count})
+    db.add(audit)
+    db.commit()
+
+    return {"status": "success", "resolved_count": updated_count}

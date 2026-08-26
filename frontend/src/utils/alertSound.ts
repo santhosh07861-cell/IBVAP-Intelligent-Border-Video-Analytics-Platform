@@ -1,13 +1,15 @@
-// Professional Security Alarm Sound Synthesizer via Web Audio API
+// Real Security Alarm Audio Controller with Browser Autoplay Unlock & Deduplication
 
-let audioCtx: AudioContext | null = null;
+let globalAudio: HTMLAudioElement | null = null;
+let isUnlocked = false;
+const playedAlertIds = new Set<string>();
 
-function getAudioContext(): AudioContext {
-  if (!audioCtx) {
-    const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
-    audioCtx = new AudioCtxClass();
+function getAudioElement(): HTMLAudioElement {
+  if (!globalAudio) {
+    globalAudio = new Audio('/sounds/security-alarm.wav');
+    globalAudio.preload = 'auto';
   }
-  return audioCtx;
+  return globalAudio;
 }
 
 export function isAlarmMuted(): boolean {
@@ -25,57 +27,79 @@ export function toggleAlarmMute(): boolean {
   return next;
 }
 
-export async function playDangerAlarmSound(): Promise<boolean> {
+export function isAudioArmed(): boolean {
+  return isUnlocked && !isAlarmMuted();
+}
+
+export async function unlockAudioContext(): Promise<boolean> {
+  try {
+    const audio = getAudioElement();
+    audio.volume = 0.01;
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      await playPromise;
+      audio.pause();
+      audio.currentTime = 0;
+      audio.volume = 1.0;
+    }
+    isUnlocked = true;
+    console.log('[ALARM AUDIO] AudioContext unlocked successfully via user gesture.');
+    return true;
+  } catch (err) {
+    console.warn('[ALARM AUDIO] Autoplay unlock required user gesture:', err);
+    return false;
+  }
+}
+
+export async function playTestAlarm(): Promise<{ success: boolean; message: string }> {
+  try {
+    const audio = getAudioElement();
+    audio.volume = 1.0;
+    audio.currentTime = 0;
+    await audio.play();
+    isUnlocked = true;
+    return { success: true, message: 'Test alarm played successfully!' };
+  } catch (err: any) {
+    console.error('[ALARM AUDIO ERROR] Test alarm blocked by browser:', err);
+    return {
+      success: false,
+      message: `Alarm sound blocked by browser autoplay policy. Click "ENABLE ALARM SOUND" button first. (${err.message || 'Blocked'})`
+    };
+  }
+}
+
+export async function playDangerAlarmSound(alertId?: string): Promise<boolean> {
   if (isAlarmMuted()) {
+    console.log('[ALARM AUDIO] Alarm is muted by operator. Skipping playback.');
     return true;
   }
 
-  try {
-    const ctx = getAudioContext();
-    if (ctx.state === 'suspended') {
-      await ctx.resume();
+  if (alertId) {
+    if (playedAlertIds.has(alertId)) {
+      console.log(`[ALARM AUDIO] Alert ${alertId} sound already played. Deduplicating.`);
+      return true;
     }
+    playedAlertIds.add(alertId);
+    // Keep set bounded
+    if (playedAlertIds.size > 500) {
+      const oldest = playedAlertIds.values().next().value;
+      if (oldest) playedAlertIds.delete(oldest);
+    }
+  }
 
-    const now = ctx.currentTime;
-
-    // Dual-tone sweeping security alarm pulse
-    const osc1 = ctx.createOscillator();
-    const osc2 = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc1.type = 'sawtooth';
-    osc2.type = 'sine';
-
-    // Frequency sweep: 880Hz -> 1760Hz -> 880Hz over 1.2s
-    osc1.frequency.setValueAtTime(880, now);
-    osc1.frequency.linearRampToValueAtTime(1760, now + 0.3);
-    osc1.frequency.linearRampToValueAtTime(880, now + 0.6);
-    osc1.frequency.linearRampToValueAtTime(1760, now + 0.9);
-    osc1.frequency.linearRampToValueAtTime(880, now + 1.2);
-
-    osc2.frequency.setValueAtTime(440, now);
-    osc2.frequency.linearRampToValueAtTime(880, now + 0.6);
-    osc2.frequency.linearRampToValueAtTime(440, now + 1.2);
-
-    // Envelope
-    gain.gain.setValueAtTime(0.01, now);
-    gain.gain.exponentialRampToValueAtTime(0.3, now + 0.05);
-    gain.gain.setValueAtTime(0.3, now + 1.1);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.25);
-
-    osc1.connect(gain);
-    osc2.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc1.start(now);
-    osc2.start(now);
-
-    osc1.stop(now + 1.25);
-    osc2.stop(now + 1.25);
-
+  try {
+    const audio = getAudioElement();
+    audio.volume = 1.0;
+    audio.currentTime = 0;
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      await playPromise;
+    }
+    isUnlocked = true;
+    console.log(`[ALARM AUDIO] 🚨 REAL ALARM SOUND PLAYED SUCCESSFULLY for Alert #${alertId || 'NEW'}`);
     return true;
-  } catch (err) {
-    console.warn('Audio alarm playback restricted by browser autoplay policy:', err);
+  } catch (err: any) {
+    console.error(`[ALARM AUDIO ERROR] Alarm sound blocked by browser for Alert #${alertId}:`, err);
     return false;
   }
 }

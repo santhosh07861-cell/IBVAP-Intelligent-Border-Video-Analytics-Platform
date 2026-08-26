@@ -3,7 +3,7 @@ import { Shield, Radio, Activity, User, LogOut, Cpu, AlertTriangle, Volume2, Vol
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../context/WebSocketContext';
 import { Link, useNavigate } from 'react-router-dom';
-import { isAlarmMuted, toggleAlarmMute } from '../utils/alertSound';
+import { isAlarmMuted, toggleAlarmMute, unlockAudioContext, playTestAlarm, isAudioArmed } from '../utils/alertSound';
 
 export const Navbar: React.FC = () => {
   const { user, logout } = useAuth();
@@ -11,6 +11,7 @@ export const Navbar: React.FC = () => {
   const navigate = useNavigate();
   const [timeStr, setTimeStr] = useState<string>('');
   const [muted, setMuted] = useState<boolean>(isAlarmMuted());
+  const [armed, setArmed] = useState<boolean>(isAudioArmed());
 
   useEffect(() => {
     const updateTime = () => {
@@ -69,17 +70,47 @@ export const Navbar: React.FC = () => {
 
         <div className="h-4 w-px bg-[#252d42]" />
 
-        {/* Alarm Sound Toggle */}
-        <button
-          onClick={handleToggleMute}
-          title={muted ? "Unmute Security Alarm" : "Mute Security Alarm"}
-          className={`flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-mono transition-colors border ${
-            muted ? 'bg-slate-800 text-slate-400 border-slate-700' : 'bg-red-950/60 text-red-400 border-red-800/60'
-          }`}
-        >
-          {muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 animate-pulse" />}
-          <span>{muted ? 'ALARM MUTED' : 'ALARM ON'}</span>
-        </button>
+        {/* Alarm Sound Controls & Armed Status */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={async () => {
+              if (muted) {
+                const nextMuted = toggleAlarmMute();
+                setMuted(nextMuted);
+              }
+              const ok = await unlockAudioContext();
+              setArmed(ok);
+            }}
+            title={muted ? "Unmute Security Alarm" : armed ? "Alarm System Armed & Sound Ready" : "Click to Enable Alarm Sound"}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-mono transition-all border ${
+              muted
+                ? 'bg-slate-800 text-slate-400 border-slate-700'
+                : armed
+                ? 'bg-emerald-950/60 text-emerald-400 border-emerald-500/50 shadow-lg shadow-emerald-950/40'
+                : 'bg-amber-950/80 text-amber-300 border-amber-500/60 animate-pulse'
+            }`}
+          >
+            {muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+            <span className="font-bold">
+              {muted ? 'ALARM MUTED' : armed ? '🔊 ALARM ARMED' : '🔊 ENABLE ALARM SOUND'}
+            </span>
+          </button>
+
+          <button
+            onClick={async () => {
+              const res = await playTestAlarm();
+              if (res.success) {
+                setArmed(true);
+              } else {
+                alert(res.message);
+              }
+            }}
+            title="Test Alarm Audio Output"
+            className="px-2 py-1 bg-red-950/60 hover:bg-red-900/60 text-red-300 border border-red-800/60 rounded text-[10px] font-mono font-bold transition-colors"
+          >
+            TEST ALARM
+          </button>
+        </div>
 
         <div className="h-4 w-px bg-[#252d42]" />
 
