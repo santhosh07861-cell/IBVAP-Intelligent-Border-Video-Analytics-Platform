@@ -480,9 +480,21 @@ export const CameraList: React.FC = () => {
             </div>
 
             {errorMessage && (
-              <div className="p-3 bg-red-950/50 border border-red-500/50 rounded-lg text-xs font-mono text-red-300 flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                <span>{errorMessage}</span>
+              <div className="p-3 bg-red-950/60 border border-red-500/60 rounded-lg text-xs font-mono text-red-300 space-y-2">
+                <div className="flex items-start gap-2 font-bold text-red-200">
+                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span>{errorMessage}</span>
+                </div>
+                {form.protocol === 'RTSP' && (
+                  <div className="text-[11px] text-slate-300 bg-black/40 p-2 rounded space-y-1">
+                    <div className="font-bold text-amber-400">📱 IP WEBCAM TROUBLESHOOTING CHECKLIST:</div>
+                    <div>1. Open <strong>IP Webcam</strong> app on your Android/iPhone.</div>
+                    <div>2. Tap <strong>Start Server</strong> at the bottom of the app screen.</div>
+                    <div>3. Ensure Mac and Phone are connected to the <strong>SAME Wi-Fi network</strong>.</div>
+                    <div>4. Check the exact IP address & Port shown on your phone screen.</div>
+                    <div>5. 💡 <em>Quick Alternative</em>: Select <strong>WEBCAM</strong> tab to use your Mac camera, or <strong>MP4 VIDEO</strong> tab to run the border patrol demo video!</div>
+                  </div>
+                )}
               </div>
             )}
 
