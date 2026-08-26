@@ -59,6 +59,7 @@ class AISurveillanceAgent:
         self.scorer = OperationalRiskScorer()
         self.evidence_mgr = EvidenceManager()
         self.last_alert_times: Dict[str, float] = {}
+        self.last_detection_snapshot_times: Dict[Tuple[str, int], float] = {}
         self.track_zone_states: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
         self.mode_label = "REAL AI | INFERENCE RUNNING"
 
@@ -78,12 +79,124 @@ class AISurveillanceAgent:
 
         latency_ms = round((time.time() - loop_start_time) * 1000, 1)
 
-        # 5. Evaluate Zones, Behavior, Risk & Generate Real Alerts for confirmed tracks ONLY
+        # 5. Confirmed tracks ONLY trigger detection snapshots & rule evaluation
         confirmed_objs = [obj for obj in tracked_objects if obj.is_confirmed]
         if confirmed_objs:
+            # A. Process Category A: Detection Snapshots (Per-track 10-second cooldown)
+            now_sec = time.time()
+            for obj in confirmed_objs:
+                track_key = (self.camera_id, obj.track_id)
+                if now_sec - self.last_detection_snapshot_times.get(track_key, 0) >= 10.0:
+                    self.last_detection_snapshot_times[track_key] = now_sec
+                    print(f"[EVIDENCE] Detection confirmed: track P-{obj.track_id} ({obj.class_name})")
+                    await self._create_and_broadcast_detection_evidence(obj, frame)
+
+            # B. Process Category B: Security Rules & Alerts
             await self._evaluate_surveillance_rules(confirmed_objs, frame)
 
         return tracked_objects, latency_ms, self.detector.conf_threshold
+
+    async def _create_and_broadcast_detection_evidence(self, obj: TrackedObject, frame: np.ndarray):
+        if frame is None or frame.size == 0:
+            print("[EVIDENCE ERROR] Frame matrix is empty or None")
+            return
+
+        db = SessionLocal()
+        try:
+            cam = db.query(Camera).filter(Camera.camera_id == self.camera_id).first()
+            if not cam:
+                print(f"[EVIDENCE ERROR] Camera {self.camera_id} not found in database")
+                return
+
+            saved = self.evidence_mgr.save_annotated_snapshot(
+                frame=frame,
+                camera_id=cam.camera_id,
+                bbox=obj.bbox,
+                label=obj.class_name,
+                track_id=obj.track_id,
+                confidence=obj.confidence,
+                event_type="DETECTION"
+            )
+
+            if not saved:
+                print("[EVIDENCE ERROR] save_annotated_snapshot returned None")
+                return
+
+            file_path, file_url, file_size = saved
+
+            ev_meta = {
+                "camera_id": cam.id,
+                "camera_number": cam.camera_id,
+                "camera_name": cam.name,
+                "location": cam.location or "Sector 4 Border Outpost",
+                "object_class": obj.class_name,
+                "confidence": obj.confidence,
+                "track_id": f"P-{obj.track_id}",
+                "event_type": "DETECTION",
+                "risk_score": 0.0,
+                "severity": "INFO",
+                "captured_at": datetime.utcnow().isoformat(),
+                "bbox": obj.bbox,
+                "file_path": file_path,
+                "file_url": file_url
+            }
+
+            ev_record = Evidence(
+                id=str(uuid.uuid4()),
+                camera_id=cam.id,
+                evidence_type="snapshot",
+                file_path=file_path,
+                file_url=file_url,
+                file_size_bytes=file_size,
+                metadata_json=ev_meta,
+                created_at=datetime.utcnow()
+            )
+            db.add(ev_record)
+            db.commit()
+
+            print(f"[EVIDENCE] PostgreSQL record created: ID {ev_record.id}")
+            image_api_url = f"/api/evidence/{ev_record.id}/image"
+            print(f"[EVIDENCE] Evidence URL generated: {image_api_url}")
+
+            # Broadcast EVIDENCE_NEW via WebSocket
+            ws_payload = {
+                "type": "EVIDENCE_NEW",
+                "evidence_id": ev_record.id,
+                "camera_id": cam.id,
+                "camera_number": cam.camera_id,
+                "camera_name": cam.name,
+                "location": cam.location or "Sector 4 Border Outpost",
+                "object_class": obj.class_name,
+                "track_id": f"P-{obj.track_id}",
+                "confidence": obj.confidence,
+                "event_type": "DETECTION",
+                "risk_score": 0.0,
+                "severity": "INFO",
+                "timestamp": ev_record.created_at.isoformat(),
+                "file_url": image_api_url,
+                "evidence": {
+                    "id": ev_record.id,
+                    "camera_id": cam.id,
+                    "camera_number": cam.camera_id,
+                    "camera_name": cam.name,
+                    "location": cam.location or "Sector 4 Border Outpost",
+                    "object_class": obj.class_name,
+                    "track_id": f"P-{obj.track_id}",
+                    "confidence": obj.confidence,
+                    "event_type": "DETECTION",
+                    "risk_score": 0.0,
+                    "severity": "INFO",
+                    "captured_at": ev_record.created_at.isoformat(),
+                    "file_url": image_api_url
+                }
+            }
+            await self.ws_manager.broadcast(ws_payload)
+            print("[EVIDENCE] Web/API record available and broadcasted via WS")
+        except Exception as ex:
+            print(f"[EVIDENCE ERROR] Failed to record detection evidence: {ex}")
+            db.rollback()
+        finally:
+            db.close()
 
     async def _evaluate_surveillance_rules(self, confirmed_objs: List[TrackedObject], frame: Optional[np.ndarray] = None):
         if not confirmed_objs:
@@ -249,8 +362,9 @@ class AISurveillanceAgent:
             db.add(inc)
             inc_id = inc.id
 
-        # Save Evidence Snapshot directly from actual camera frame matrix
-        file_path, file_url = None, None
+        # Save Security Event Evidence Snapshot directly from actual camera frame matrix
+        file_path, file_url, file_size = None, None, 0
+        ev_record = None
         if frame is not None:
             saved = self.evidence_mgr.save_annotated_snapshot(
                 frame=frame,
@@ -262,7 +376,7 @@ class AISurveillanceAgent:
                 event_type=event_type
             )
             if saved:
-                file_path, file_url = saved
+                file_path, file_url, file_size = saved
                 al.evidence_url = file_url
 
                 # Save Evidence Record in DB
@@ -280,7 +394,9 @@ class AISurveillanceAgent:
                     "captured_at": datetime.utcnow().isoformat(),
                     "bbox": obj.bbox,
                     "alert_id": al.id,
-                    "event_id": ev.id
+                    "event_id": ev.id,
+                    "file_path": file_path,
+                    "file_url": file_url
                 }
                 ev_record = Evidence(
                     id=str(uuid.uuid4()),
@@ -289,6 +405,7 @@ class AISurveillanceAgent:
                     evidence_type="snapshot",
                     file_path=file_path,
                     file_url=file_url,
+                    file_size_bytes=file_size,
                     metadata_json=ev_meta,
                     created_at=datetime.utcnow()
                 )
@@ -296,6 +413,29 @@ class AISurveillanceAgent:
 
         # Single DB commit per state-transition event
         db.commit()
+
+        if ev_record:
+            image_api_url = f"/api/evidence/{ev_record.id}/image"
+            print(f"[EVIDENCE] Security Event Evidence Record Created: {ev_record.id}")
+            print(f"[EVIDENCE] Evidence URL generated: {image_api_url}")
+
+            # Broadcast EVIDENCE_NEW over WebSocket
+            await self.ws_manager.broadcast({
+                "type": "EVIDENCE_NEW",
+                "evidence_id": ev_record.id,
+                "camera_id": cam.id,
+                "camera_number": cam.camera_id,
+                "camera_name": cam.name,
+                "location": cam.location or "Sector 4 Border Outpost",
+                "object_class": obj.class_name,
+                "track_id": f"P-{obj.track_id}",
+                "confidence": obj.confidence,
+                "event_type": event_type,
+                "risk_score": risk_score,
+                "severity": severity,
+                "timestamp": ev_record.created_at.isoformat(),
+                "file_url": image_api_url
+            })
 
         # Broadcast Real Alert over WebSocket with rich metadata
         ws_payload = {

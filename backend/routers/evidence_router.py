@@ -59,6 +59,8 @@ def list_evidence(
             if not match:
                 continue
 
+        img_url = f"/api/evidence/{item.id}/image" if (item.file_path and os.path.exists(item.file_path)) else item.file_url
+
         results.append({
             "id": item.id,
             "incident_id": item.incident_id,
@@ -70,15 +72,15 @@ def list_evidence(
             "confidence": meta.get("confidence", 0.90),
             "track_id": meta.get("track_id", "P-101"),
             "event_type": ev_type,
-            "risk_score": meta.get("risk_score", 75.0),
+            "risk_score": meta.get("risk_score", 0.0),
             "severity": sev,
             "captured_at": item.created_at.isoformat(),
             "bbox": meta.get("bbox", [0.2, 0.2, 0.4, 0.6]),
             "alert_id": meta.get("alert_id"),
             "event_id": meta.get("event_id"),
             "file_path": item.file_path,
-            "file_url": item.file_url,
-            "evidence_url": item.file_url
+            "file_url": img_url,
+            "evidence_url": img_url
         })
 
     limit_val = int(limit.default) if hasattr(limit, 'default') else int(limit)
@@ -116,6 +118,9 @@ def list_detections_alias(
         db=db, current_user=current_user
     )
 
+from fastapi.responses import FileResponse
+import os
+
 @router.get("/{evidence_id}")
 def get_evidence_detail(
     evidence_id: str,
@@ -129,6 +134,8 @@ def get_evidence_detail(
     meta = item.metadata_json or {}
     cam = db.query(Camera).filter(Camera.id == item.camera_id).first()
 
+    image_api_url = f"/api/evidence/{item.id}/image"
+
     return {
         "id": item.id,
         "incident_id": item.incident_id,
@@ -140,13 +147,24 @@ def get_evidence_detail(
         "object_class": meta.get("object_class", "person"),
         "confidence": meta.get("confidence", 0.90),
         "track_id": meta.get("track_id", "P-101"),
-        "event_type": meta.get("event_type", "INTRUSION"),
-        "risk_score": meta.get("risk_score", 75.0),
-        "severity": meta.get("severity", "HIGH"),
+        "event_type": meta.get("event_type", "DETECTION"),
+        "risk_score": meta.get("risk_score", 0.0),
+        "severity": meta.get("severity", "INFO"),
         "captured_at": item.created_at.isoformat(),
         "bbox": meta.get("bbox", [0.2, 0.2, 0.4, 0.6]),
         "alert_id": meta.get("alert_id"),
         "event_id": meta.get("event_id"),
         "file_path": item.file_path,
-        "file_url": item.file_url
+        "file_url": image_api_url,
+        "evidence_url": image_api_url
     }
+
+@router.get("/{evidence_id}/image")
+def get_evidence_image(
+    evidence_id: str,
+    db: Session = Depends(get_db)
+):
+    item = db.query(Evidence).filter(Evidence.id == evidence_id).first()
+    if not item or not item.file_path or not os.path.exists(item.file_path):
+        raise HTTPException(status_code=404, detail="Evidence image file not found")
+    return FileResponse(item.file_path, media_type="image/jpeg")

@@ -17,6 +17,18 @@ export interface DetectionMessage {
   fps?: number;
   latency_ms?: number;
   alert?: any;
+  evidence_id?: string;
+  camera_number?: string;
+  camera_name?: string;
+  location?: string;
+  object_class?: string;
+  track_id?: string;
+  confidence?: number;
+  event_type?: string;
+  risk_score?: number;
+  severity?: string;
+  file_url?: string;
+  evidence?: any;
 }
 
 interface WebSocketContextType {

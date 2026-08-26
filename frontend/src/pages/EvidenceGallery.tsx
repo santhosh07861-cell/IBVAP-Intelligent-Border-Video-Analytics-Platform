@@ -4,6 +4,7 @@ import {
   Eye, Calendar, ArrowUpDown, RefreshCw, Cpu, Layers
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useWebSocket } from '../context/WebSocketContext';
 import { EvidenceDetailModal } from '../components/EvidenceDetailModal';
 
 export const EvidenceGallery: React.FC = () => {
@@ -21,6 +22,7 @@ export const EvidenceGallery: React.FC = () => {
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
 
   const { token } = useAuth();
+  const { lastMessage } = useWebSocket();
 
   const fetchEvidence = async () => {
     setLoading(true);
@@ -53,6 +55,30 @@ export const EvidenceGallery: React.FC = () => {
   useEffect(() => {
     fetchEvidence();
   }, [objectFilter, cameraFilter, severityFilter, eventFilter, search, token]);
+
+  // Prepend live WebSocket EVIDENCE_NEW events
+  useEffect(() => {
+    if (lastMessage && lastMessage.type === 'EVIDENCE_NEW') {
+      const newEv = lastMessage.evidence || {
+        id: lastMessage.evidence_id,
+        camera_id: lastMessage.camera_id,
+        camera_number: lastMessage.camera_number,
+        camera_name: lastMessage.camera_name,
+        location: lastMessage.location,
+        object_class: lastMessage.object_class,
+        confidence: lastMessage.confidence,
+        track_id: lastMessage.track_id,
+        event_type: lastMessage.event_type || 'DETECTION',
+        risk_score: lastMessage.risk_score || 0.0,
+        severity: lastMessage.severity || 'INFO',
+        captured_at: lastMessage.timestamp || new Date().toISOString(),
+        file_url: lastMessage.file_url,
+        evidence_url: lastMessage.file_url
+      };
+
+      setItems(prev => [newEv, ...prev.filter(item => item.id !== newEv.id)]);
+    }
+  }, [lastMessage]);
 
   const sortedItems = [...items].sort((a, b) => {
     const timeA = new Date(a.captured_at).getTime();
