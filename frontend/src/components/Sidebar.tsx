@@ -2,7 +2,7 @@ import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useWebSocket } from '../context/WebSocketContext';
 import {
-  LayoutDashboard, Video, Camera, Shapes, Bell, AlertOctagon,
+  LayoutDashboard, Video, Globe, Camera, Shapes, Bell, AlertOctagon,
   FileText, UserCheck, BarChart3, Activity, HeartPulse, Cpu,
   ShieldCheck, PlaySquare, Scan
 } from 'lucide-react';
@@ -10,6 +10,7 @@ import {
 const navItems = [
   { path: '/dashboard', label: 'Command Center', icon: LayoutDashboard },
   { path: '/surveillance', label: 'Live Surveillance', icon: Video },
+  { path: '/gis-map', label: '3D Tactical GIS Map', icon: Globe },
   { path: '/cameras', label: 'Camera Management', icon: Camera },
   { path: '/zones', label: 'Virtual Fences', icon: Shapes },
   { path: '/alerts', label: 'Live Alerts', icon: Bell },

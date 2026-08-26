@@ -22,6 +22,7 @@ import { ModelRegistryView } from './pages/ModelRegistryView';
 import { AuditView } from './pages/AuditView';
 import { DemoControl } from './pages/DemoControl';
 import { EvidenceGallery } from './pages/EvidenceGallery';
+import { TacticalGISMap } from './pages/TacticalGISMap';
 
 const ProtectedLayout: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -38,6 +39,7 @@ const ProtectedLayout: React.FC = () => {
           <Routes>
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/surveillance" element={<Surveillance />} />
+            <Route path="/gis-map" element={<TacticalGISMap />} />
             <Route path="/cameras" element={<CameraList />} />
             <Route path="/zones" element={<ZoneEditor />} />
             <Route path="/alerts" element={<AlertList />} />
