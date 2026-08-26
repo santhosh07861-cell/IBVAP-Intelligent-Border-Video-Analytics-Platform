@@ -67,8 +67,12 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   useEffect(() => {
     refreshCameras();
-    const interval = setInterval(refreshCameras, 3000);
-    return () => clearInterval(interval);
+    const timer = setTimeout(() => setLoading(false), 500);
+    const interval = setInterval(refreshCameras, 5000); // Silent refresh every 5s
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
   }, [refreshCameras]);
 
   const primaryCamera = cameras.find(c => c.role === 'primary') || (cameras.length > 0 ? cameras[0] : null);

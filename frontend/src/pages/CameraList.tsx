@@ -27,7 +27,8 @@ export const CameraList: React.FC = () => {
 
   const [loading, setLoading] = useState(true);
 
-  const fetchCameras = async () => {
+  const fetchCameras = async (showSpinner = false) => {
+    if (showSpinner) setLoading(true);
     try {
       const authToken = token || localStorage.getItem('ibvap_token');
       const headers: any = {};
@@ -48,13 +49,17 @@ export const CameraList: React.FC = () => {
   };
 
   useEffect(() => {
-    fetchCameras();
-    const interval = setInterval(fetchCameras, 3000);
+    fetchCameras(true);  // Show spinner only on first load
+    const timer = setTimeout(() => setLoading(false), 500);
+    const interval = setInterval(() => fetchCameras(false), 5000); // Silent refresh every 5s
     const query = new URLSearchParams(location.search);
     if (query.get('add') === 'true') {
       setShowModal(true);
     }
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
   }, [token, location]);
 
   const handleSourceTypeChange = (proto: string) => {

@@ -57,10 +57,10 @@ class TestConnectionRequest(BaseModel):
     stream_url: str
 
 @router.get("", response_model=List[CameraResponse])
-def list_cameras(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+async def list_cameras(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     cameras = db.query(Camera).all()
 
-    # Ensure exactly one Primary camera exists if any cameras are registered
+    # Ensure exactly one Primary camera exists — only write if needed (avoids gratuitous commit on every poll)
     if cameras:
         has_primary = any(c.role == "primary" for c in cameras)
         if not has_primary:
