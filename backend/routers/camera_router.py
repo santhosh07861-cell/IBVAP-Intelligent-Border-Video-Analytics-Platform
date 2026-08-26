@@ -1,4 +1,5 @@
 import re
+import os
 import time
 import uuid
 import cv2
@@ -6,6 +7,9 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
+
+# Force FFmpeg C++ socket layer to fail in 1.0s max instead of blocking for 30s
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;1000000|stimeout;1000000|rw_timeout;1000000"
 
 from database.connection import get_db
 from database.schema import Camera, CameraHealth, CameraZone, ZoneRule, AuditLog
@@ -156,8 +160,7 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_
 @router.post("/test-connection", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
 def test_connection(payload: TestConnectionRequest, current_user = Depends(get_current_user)):
     """
-    Tests connection to a video source (RTSP, Webcam, or MP4) using OpenCV.
-    Masks credentials in RTSP URLs. Automatically handles IP Webcam stream URLs.
+    Tests connection to a video source (RTSP, Webcam, or MP4) using OpenCV with a hard 1.5s timeout.
     """
     url = payload.stream_url.strip()
     if (url.startswith("http://") or url.startswith("https://")) and not any(url.endswith(x) for x in ["/video", "/shot.jpg", ".mp4", "/mjpeg"]):
@@ -176,7 +179,7 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
             port = parsed.port or (443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else 554)
             if host:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1.5)
+                s.settimeout(0.5)
                 res = s.connect_ex((host, port))
                 s.close()
                 if res != 0:
@@ -190,7 +193,24 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
         except Exception:
             pass
 
-    try:
+    # Fast HTTP header probe for http/https streams (fails fast in 0.8s if stream header hangs)
+    if url.startswith("http://") or url.startswith("https://"):
+        try:
+            import requests
+            resp = requests.get(url, stream=True, timeout=0.8)
+            resp.close()
+        except requests.exceptions.Timeout:
+            return {
+                "status": "FAILED",
+                "protocol": proto,
+                "stream_url": masked_url,
+                "latency_ms": 800.0,
+                "message": f"Stream server at {masked_url} did not respond with video stream data within 800ms. Check IP and Port."
+            }
+        except Exception:
+            pass
+
+    def _attempt_open():
         if proto == "WEBCAM":
             dev_idx = int(url) if str(url).isdigit() else 0
             cap = cv2.VideoCapture(dev_idx)
@@ -200,25 +220,25 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
             cap = cv2.VideoCapture(url)
 
         if not cap.isOpened():
-            return {
-                "status": "FAILED",
-                "protocol": proto,
-                "stream_url": masked_url,
-                "latency_ms": 0.0,
-                "message": f"Could not open {proto} stream source at {masked_url}."
-            }
-
+            return False, None
         ret, frame = cap.read()
-        latency = round((time.time() - start_t) * 1000, 1)
         cap.release()
+        return ret, frame
 
+    try:
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            fut = executor.submit(_attempt_open)
+            ret, frame = fut.result(timeout=1.0)
+
+        latency = round((time.time() - start_t) * 1000, 1)
         if ret and frame is not None:
             return {
                 "status": "SUCCESS",
                 "protocol": proto,
                 "stream_url": masked_url,
                 "latency_ms": latency,
-                "message": f"Successfully connected to {proto} stream source. Frame resolution: {frame.shape[1]}x{frame.shape[0]}."
+                "message": f"Successfully connected to {proto} stream source. Resolution: {frame.shape[1]}x{frame.shape[0]}."
             }
         else:
             return {
@@ -226,15 +246,15 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
                 "protocol": proto,
                 "stream_url": masked_url,
                 "latency_ms": latency,
-                "message": f"Connected to {proto} source but failed to receive video frames."
+                "message": f"Connected to {proto} source at {masked_url} but failed to receive video frames."
             }
     except Exception as e:
         return {
             "status": "FAILED",
             "protocol": proto,
             "stream_url": masked_url,
-            "latency_ms": 0.0,
-            "message": f"Error testing connection: {str(e)}"
+            "latency_ms": 1000.0,
+            "message": f"Stream connection timed out after 1.0s. Ensure phone camera server is active."
         }
 
 @router.post("/{camera_id}/start", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
@@ -257,7 +277,7 @@ def start_camera(camera_id: str, db: Session = Depends(get_db), current_user = D
             if host:
                 af = socket.AF_INET6 if ":" in host else socket.AF_INET
                 s = socket.socket(af, socket.SOCK_STREAM)
-                s.settimeout(1.5)
+                s.settimeout(0.5)
                 res = s.connect_ex((host, port))
                 s.close()
                 if res != 0:
@@ -266,10 +286,27 @@ def start_camera(camera_id: str, db: Session = Depends(get_db), current_user = D
                     db.commit()
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Cannot connect to {host}:{port}. Ensure your Mac and Phone are on the SAME Wi-Fi network."
+                        detail=f"Cannot connect to {host}:{port}. Ensure your Mac and Phone are on the SAME Wi-Fi network and app server is started."
                     )
         except HTTPException:
             raise
+        except Exception:
+            pass
+
+    # Fast HTTP header probe for http/https streams (fails fast in 0.8s if stream header hangs)
+    if url.startswith("http://") or url.startswith("https://"):
+        try:
+            import requests
+            resp = requests.get(url, stream=True, timeout=0.8)
+            resp.close()
+        except requests.exceptions.Timeout:
+            cam.status = "ERROR"
+            if cam.health: cam.health.status = "ERROR"
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Stream server at {url} did not respond with video stream data within 800ms. Check IP, Port, and Path."
+            )
         except Exception:
             pass
 
