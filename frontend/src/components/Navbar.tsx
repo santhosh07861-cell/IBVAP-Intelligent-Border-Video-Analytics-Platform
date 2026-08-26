@@ -5,7 +5,7 @@ import { useWebSocket } from '../context/WebSocketContext';
 import { Link, useNavigate } from 'react-router-dom';
 import { isAlarmMuted, toggleAlarmMute, unlockAudioContext, playTestAlarm, isAudioArmed } from '../utils/alertSound';
 
-export const Navbar: React.FC = () => {
+const NavbarComponent: React.FC = () => {
   const { user, logout } = useAuth();
   const { isConnected, lastMessage } = useWebSocket();
   const navigate = useNavigate();
@@ -149,3 +149,5 @@ export const Navbar: React.FC = () => {
     </header>
   );
 };
+
+export const Navbar = React.memo(NavbarComponent);

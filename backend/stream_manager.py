@@ -40,6 +40,7 @@ class StreamWorker:
         # Performance & Throttling state
         self.is_inferencing = False
         self.last_ai_time = 0.0
+        self.last_ws_time = 0.0
         self.last_db_update_time = 0.0
         self.last_status = "OFFLINE"
         self.latest_tracked_objs = []
@@ -63,9 +64,9 @@ class StreamWorker:
         self.is_inferencing = True
         try:
             async with GLOBAL_INFERENCE_SEMAPHORE:
-                tracked_objs, latency_ms, _ = await self.agent.process_frame(frame, loop_start)
-                self.latest_tracked_objs = tracked_objs
-                self.latest_latency_ms = latency_ms
+                objs, lat, conf = await self.agent.process_frame(frame, loop_start)
+                self.latest_tracked_objs = objs
+                self.latest_latency_ms = lat
                 self.last_ai_time = time.time()
         except Exception as e:
             logger.error(f"Error in async AI step for {self.camera_id}: {e}")
@@ -101,34 +102,37 @@ class StreamWorker:
             elapsed = time.time() - start_time
             current_fps = round(frame_count / max(1.0, elapsed), 1)
 
-            # 2. Trigger async AI inference at sampled rate (~5-8 AI FPS), skipping intermediate frames if inference is busy
-            if not self.is_inferencing and (time.time() - self.last_ai_time >= 0.12):
+            # 2. Trigger async AI inference at sampled rate (~8-10 AI FPS), skipping intermediate frames if inference is busy
+            if not self.is_inferencing and (time.time() - self.last_ai_time >= 0.10):
                 asyncio.create_task(self._async_ai_step(frame.copy(), loop_start))
 
-            # 3. Telemetry WS update (Throttled, only broadcast active detections state)
-            dets_payload = [
-                {
-                    "track_id": t.track_id,
-                    "class_name": t.class_name,
-                    "confidence": t.confidence,
-                    "bbox": t.bbox,
-                    "dwell_time_sec": t.dwell_time_sec,
-                    "is_confirmed": getattr(t, "is_confirmed", False),
-                    "is_fallback": False
-                } for t in self.latest_tracked_objs if getattr(t, "is_confirmed", False)
-            ]
+            # 3. Telemetry WS update (Throttled to 6 Hz - every 0.16s - saving 75% of WS framing overhead)
+            now_ws = time.time()
+            if now_ws - self.last_ws_time >= 0.16:
+                self.last_ws_time = now_ws
+                dets_payload = [
+                    {
+                        "track_id": t.track_id,
+                        "class_name": t.class_name,
+                        "confidence": t.confidence,
+                        "bbox": t.bbox,
+                        "dwell_time_sec": t.dwell_time_sec,
+                        "is_confirmed": getattr(t, "is_confirmed", False),
+                        "is_fallback": False
+                    } for t in self.latest_tracked_objs if getattr(t, "is_confirmed", False)
+                ]
 
-            ws_payload = {
-                "type": "DETECTIONS_UPDATE",
-                "camera_id": self.camera_id,
-                "timestamp": datetime.utcnow().isoformat(),
-                "inference_mode": "REAL AI | INFERENCE RUNNING",
-                "detections": dets_payload,
-                "fps": current_fps,
-                "latency_ms": self.latest_latency_ms
-            }
+                ws_payload = {
+                    "type": "DETECTIONS_UPDATE",
+                    "camera_id": self.camera_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "inference_mode": "REAL AI | INFERENCE RUNNING",
+                    "detections": dets_payload,
+                    "fps": current_fps,
+                    "latency_ms": self.latest_latency_ms
+                }
 
-            await self.ws_manager.broadcast(ws_payload)
+                await self.ws_manager.broadcast(ws_payload)
 
             # 4. Throttled DB status updates (once every 2.5 seconds instead of 25x/sec)
             if time.time() - self.last_db_update_time >= 2.5:

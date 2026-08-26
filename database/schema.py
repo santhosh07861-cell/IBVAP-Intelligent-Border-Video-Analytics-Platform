@@ -163,19 +163,19 @@ class Alert(Base):
     __tablename__ = "alerts"
     id = Column(String, primary_key=True, default=generate_uuid)
     incident_id = Column(String, ForeignKey("incidents.id"), nullable=True)
-    camera_id = Column(String, ForeignKey("cameras.id"))
+    camera_id = Column(String, ForeignKey("cameras.id"), index=True)
     event_type = Column(String(100), nullable=False)
-    severity = Column(String(20), default="HIGH")
+    severity = Column(String(20), default="HIGH", index=True)
     risk_score = Column(Float, default=70.0)
     confidence = Column(Float, default=0.88)
-    status = Column(String(30), default="NEW")
+    status = Column(String(30), default="NEW", index=True)
     evidence_url = Column(String(500), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
 class ANPRResult(Base):
     __tablename__ = "anpr_results"
     id = Column(String, primary_key=True, default=generate_uuid)
-    camera_id = Column(String, ForeignKey("cameras.id"))
+    camera_id = Column(String, ForeignKey("cameras.id"), index=True)
     plate_text = Column(String(30), nullable=False, index=True)
     plate_confidence = Column(Float, default=0.90)
     ocr_confidence = Column(Float, default=0.88)
@@ -187,7 +187,7 @@ class ANPRResult(Base):
 class FaceDetection(Base):
     __tablename__ = "face_detections"
     id = Column(String, primary_key=True, default=generate_uuid)
-    camera_id = Column(String, ForeignKey("cameras.id"))
+    camera_id = Column(String, ForeignKey("cameras.id"), index=True)
     bbox = Column(JSON, nullable=False)
     confidence = Column(Float, default=0.92)
     crop_url = Column(String(500))
@@ -196,7 +196,7 @@ class FaceDetection(Base):
 class BehaviorEvent(Base):
     __tablename__ = "behavior_events"
     id = Column(String, primary_key=True, default=generate_uuid)
-    camera_id = Column(String, ForeignKey("cameras.id"))
+    camera_id = Column(String, ForeignKey("cameras.id"), index=True)
     track_id = Column(Integer)
     behavior_type = Column(String(100))  # LOITERING, REPEATED_CROSSING, RESTRICTED_HOUR, VEHICLE_STOPPING, CROWD, SUDDEN_SPEED
     description = Column(Text)
@@ -207,14 +207,14 @@ class Evidence(Base):
     __tablename__ = "evidence"
     id = Column(String, primary_key=True, default=generate_uuid)
     incident_id = Column(String, ForeignKey("incidents.id"))
-    camera_id = Column(String, ForeignKey("cameras.id"))
+    camera_id = Column(String, ForeignKey("cameras.id"), index=True)
     evidence_type = Column(String(30), default="snapshot")  # snapshot, object_crop, video_clip
     file_path = Column(String(500), nullable=False)
     file_url = Column(String(500), nullable=False)
     file_size_bytes = Column(Integer, default=0)
     duration_sec = Column(Float, default=0.0)
     metadata_json = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     incident = relationship("Incident", back_populates="evidence")
 
