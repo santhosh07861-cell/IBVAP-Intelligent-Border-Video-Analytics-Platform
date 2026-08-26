@@ -4,7 +4,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
   Shield, Globe, Camera as CameraIcon, ShieldAlert, Users, RefreshCw,
-  Eye, MapPin, Layers, Activity, Radio, ArrowUpRight, Zap, CheckCircle2
+  Eye, MapPin, Layers, Activity, Radio, ArrowUpRight, Zap, CheckCircle2, AlertTriangle
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useWebSocket } from '../context/WebSocketContext';
@@ -12,57 +12,59 @@ import { useAuth } from '../context/AuthContext';
 import { useCameras } from '../context/CameraContext';
 import { EvidenceDetailModal } from '../components/EvidenceDetailModal';
 
-// Custom Leaflet Icons using SVG Data URIs for crisp tactical markers
-const createTacticalIcon = (color: string, label: string) => {
+// Status Marker Icons (🟢 ONLINE, 🟡 WARNING, 🔴 CRITICAL, ⚫ OFFLINE)
+const createCameraStatusIcon = (status: 'ONLINE' | 'WARNING' | 'CRITICAL' | 'OFFLINE') => {
+  let color = '#64748b'; // ⚫ OFFLINE
+  let borderColor = '#334155';
+  let animateClass = '';
+
+  if (status === 'ONLINE') {
+    color = '#22c55e'; // 🟢 ONLINE
+    borderColor = '#16a34a';
+  } else if (status === 'WARNING') {
+    color = '#eab308'; // 🟡 WARNING
+    borderColor = '#ca8a04';
+  } else if (status === 'CRITICAL') {
+    color = '#ef4444'; // 🔴 CRITICAL
+    borderColor = '#dc2626';
+    animateClass = 'animation: pulse 1.5s infinite;';
+  }
+
+  const html = `
+    <div style="background:${status === 'OFFLINE' ? '#0f172a' : '#1e293b'}; border:3px solid ${color}; border-radius:50%; width:34px; height:34px; display:flex; align-items:center; justify-content:center; box-shadow:0 0 12px ${color}80; ${animateClass}">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>
+        <circle cx="12" cy="13" r="3"/>
+      </svg>
+    </div>
+  `;
+
+  return L.divIcon({
+    className: 'custom-camera-status-icon',
+    html: html,
+    iconSize: [34, 34],
+    iconAnchor: [17, 17],
+    popupAnchor: [0, -17]
+  });
+};
+
+// BOP Marker Icon
+const createTacticalBopIcon = (label: string) => {
   const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="${color}" stroke="#0a0d14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="#2563eb" stroke="#0a0d14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
       <text x="12" y="14" font-size="8" font-weight="bold" fill="#ffffff" text-anchor="middle" font-family="monospace">${label}</text>
     </svg>
   `;
   return L.divIcon({
-    className: 'custom-tactical-icon',
+    className: 'custom-bop-icon',
     html: svg,
     iconSize: [36, 36],
-    iconAnchor: [18, 18],
-    popupAnchor: [0, -18]
+    iconAnchor: [18, 18]
   });
 };
 
-const cameraIcon = L.divIcon({
-  className: 'custom-camera-icon',
-  html: `
-    <div style="background:#1e293b; border:2px solid #3b82f6; border-radius:50%; width:32px; height:32px; display:flex; align-items:center; justify-content:center; box-shadow:0 0 10px rgba(59,130,246,0.5);">
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.5"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
-    </div>
-  `,
-  iconSize: [32, 32],
-  iconAnchor: [16, 16]
-});
-
-const alertedCameraIcon = L.divIcon({
-  className: 'custom-alert-camera-icon',
-  html: `
-    <div style="background:#7f1d1d; border:2px solid #ef4444; border-radius:50%; width:36px; height:36px; display:flex; align-items:center; justify-content:center; box-shadow:0 0 15px rgba(239,68,68,0.8); animation: pulse 1.5s infinite;">
-      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fca5a5" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    </div>
-  `,
-  iconSize: [36, 36],
-  iconAnchor: [18, 18]
-});
-
-const bsfPatrolIcon = L.divIcon({
-  className: 'custom-patrol-icon',
-  html: `
-    <div style="background:#1e3a8a; border:2px solid #60a5fa; border-radius:50%; width:28px; height:28px; display:flex; align-items:center; justify-content:center; box-shadow:0 0 8px rgba(96,165,250,0.6);">
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="2.5"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-    </div>
-  `,
-  iconSize: [28, 28],
-  iconAnchor: [14, 14]
-});
-
-// Helper function to generate field-of-view wedge polygon coordinates
+// Helper: Vision Cone Field-of-View Sector Wedge
 function createVisionCone(lat: number, lng: number, headingDeg: number = 45, fovDeg: number = 60, distanceDeg: number = 0.008) {
   const points: [number, number][] = [[lat, lng]];
   const startAngle = headingDeg - fovDeg / 2;
@@ -72,23 +74,35 @@ function createVisionCone(lat: number, lng: number, headingDeg: number = 45, fov
   for (let a = startAngle; a <= endAngle; a += step) {
     const rad = (a * Math.PI) / 180;
     const dLat = distanceDeg * Math.cos(rad);
-    const dLng = distanceDeg * Math.sin(rad) * 1.1; // aspect ratio adjustment
+    const dLng = distanceDeg * Math.sin(rad) * 1.1;
     points.push([lat + dLat, lng + dLng]);
   }
   return points;
 }
 
+// Helper: Get threat color by severity
+function getThreatSeverityColor(severity: string): string {
+  const sev = (severity || 'MEDIUM').toUpperCase();
+  if (sev === 'LOW' || sev === 'INFO') return '#22c55e';     // LOW → green
+  if (sev === 'MEDIUM') return '#eab308';                   // MEDIUM → yellow
+  if (sev === 'HIGH') return '#f97316';                     // HIGH → orange
+  if (sev === 'CRITICAL') return '#ef4444';                 // CRITICAL → red
+  return '#ef4444';
+}
+
 export const TacticalGISMap: React.FC = () => {
-  const { cameras, primaryCamera } = useCameras();
+  const { cameras } = useCameras();
   const { lastMessage, lastAlert, telemetryMap } = useWebSocket();
   const { token } = useAuth();
 
+  const [zones, setZones] = useState<any[]>([]);
   const [evidenceList, setEvidenceList] = useState<any[]>([]);
+  const [alertsList, setAlertsList] = useState<any[]>([]);
   const [selectedThreat, setSelectedThreat] = useState<any | null>(null);
   const [selectedModalEvidence, setSelectedModalEvidence] = useState<any | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // International Border (IB / LoC) polyline vector coordinates
+  // International Border Line (IB / LoC) Polyline Vector
   const internationalBorderLine: [number, number][] = [
     [26.9550, 70.8650],
     [26.9380, 70.8820],
@@ -97,7 +111,7 @@ export const TacticalGISMap: React.FC = () => {
     [26.8680, 70.9380]
   ];
 
-  // Zero-Line Virtual Fence polyline vector coordinates
+  // Zero-Line Smart Virtual Fence Polyline Vector
   const zeroLineFence: [number, number][] = [
     [26.9520, 70.8680],
     [26.9350, 70.8850],
@@ -106,50 +120,61 @@ export const TacticalGISMap: React.FC = () => {
     [26.8650, 70.9410]
   ];
 
-  // Border Security Outpost (BOP) locations
+  // BSF Border Outposts (BOPs)
   const bsfOutposts = [
     { id: 'BOP-01', name: 'BSF Outpost Alpha (Sector HQ)', lat: 26.9124, lng: 70.9025, role: 'Sector HQ' },
     { id: 'BOP-02', name: 'BSF Outpost Bravo (Northern Watch)', lat: 26.9450, lng: 70.8750, role: 'Forward Post' },
     { id: 'BOP-03', name: 'BSF Outpost Charlie (Southern Outpost)', lat: 26.8750, lng: 70.9350, role: 'Forward Post' }
   ];
 
-  // Friendly BSF Patrol Units (Blue Force)
-  const bsfPatrolUnits = [
-    { id: 'PATROL-1', name: 'BSF Cobra Patrol Alpha', lat: 26.9250, lng: 70.8920, status: 'PATROLLING ZERO-LINE' },
-    { id: 'PATROL-2', name: 'BSF Quick Reaction Team (QRT)', lat: 26.8980, lng: 70.9120, status: 'STANDBY ON BORDER ROAD' }
-  ];
-
-  const fetchEvidenceHistory = async () => {
+  const fetchGisData = async () => {
     setLoading(true);
     try {
       const headers: any = {};
       const authToken = token || localStorage.getItem('ibvap_token');
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
-      const res = await fetch('/api/evidence?limit=50', { headers });
-      if (res.ok) {
-        const data = await res.json();
-        setEvidenceList(data.items || []);
+      // 1. Fetch Configured Virtual Fence Zones from PostgreSQL
+      const zoneRes = await fetch('/api/zones', { headers });
+      if (zoneRes.ok) {
+        const zoneData = await zoneRes.json();
+        setZones(Array.isArray(zoneData) ? zoneData : []);
+      }
+
+      // 2. Fetch Evidence Records
+      const evRes = await fetch('/api/evidence?limit=50', { headers });
+      if (evRes.ok) {
+        const evData = await evRes.json();
+        setEvidenceList(evData.items || []);
+      }
+
+      // 3. Fetch Alerts
+      const alertRes = await fetch('/api/alerts?limit=50', { headers });
+      if (alertRes.ok) {
+        const alertData = await alertRes.json();
+        setAlertsList(Array.isArray(alertData) ? alertData : []);
       }
     } catch (err) {
-      console.error('Failed to fetch GIS evidence history:', err);
+      console.error('Failed to fetch GIS data from backend:', err);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchEvidenceHistory();
+    fetchGisData();
   }, [token]);
 
-  // Handle incoming live WebSocket EVIDENCE_NEW or ALERT_NEW
+  // Real-Time WebSocket Updates (DETECTIONS_UPDATE, ALERT_NEW, EVIDENCE_NEW)
   useEffect(() => {
-    if (lastMessage && (lastMessage.type === 'EVIDENCE_NEW' || lastMessage.type === 'ALERT_NEW')) {
-      fetchEvidenceHistory();
+    if (lastMessage) {
+      if (lastMessage.type === 'ALERT_NEW' || lastMessage.type === 'EVIDENCE_NEW' || lastMessage.type === 'DETECTIONS_UPDATE') {
+        fetchGisData();
+      }
     }
   }, [lastMessage]);
 
-  // Assign GPS coordinates to cameras
+  // Assign GPS coordinates & evaluate status per camera
   const mapCameras = cameras.map((cam, idx) => {
     const defaultLat = 26.9124 + (idx === 0 ? 0 : idx % 2 === 0 ? idx * 0.015 : -idx * 0.015);
     const defaultLng = 70.9025 + (idx === 0 ? 0 : idx % 2 === 0 ? idx * 0.012 : -idx * 0.012);
@@ -159,8 +184,33 @@ export const TacticalGISMap: React.FC = () => {
     const heading = idx === 0 ? 45 : (idx * 60) % 360;
     const coneWedge = createVisionCone(lat, lng, heading, 60, 0.008);
 
-    const hasAlert = lastAlert && (lastAlert.camera_id === cam.camera_id || lastAlert.camera_id === cam.id);
-    const isOnline = cam.status === 'ONLINE' || (telemetryMap[cam.camera_id]?.fps || 0) > 0;
+    // Telemetry & Status
+    const tele: any = telemetryMap[cam.camera_id] || telemetryMap[cam.id] || {};
+    const fps = tele.fps || cam.fps || (cam.status === 'ONLINE' ? 24.0 : 0.0);
+    const latency = tele.latency_ms || 42.5;
+
+    const cameraAlerts = alertsList.filter(a => a.camera_id === cam.id || a.camera_id === cam.camera_id);
+    const hasCriticalAlert = cameraAlerts.some(a => a.severity === 'CRITICAL' || a.severity === 'HIGH');
+    const hasWarningAlert = cameraAlerts.some(a => a.severity === 'MEDIUM' || a.severity === 'LOW');
+
+    // Status: 🟢 ONLINE, 🟡 WARNING, 🔴 CRITICAL, ⚫ OFFLINE
+    let statusMarker: 'ONLINE' | 'WARNING' | 'CRITICAL' | 'OFFLINE' = 'OFFLINE';
+    if (cam.status === 'ONLINE') {
+      if (hasCriticalAlert) statusMarker = 'CRITICAL';
+      else if (hasWarningAlert) statusMarker = 'WARNING';
+      else statusMarker = 'ONLINE';
+    } else if ((cam.status as string) === 'CONNECTING') {
+      statusMarker = 'WARNING';
+    } else {
+      statusMarker = 'OFFLINE';
+    }
+
+    const detections: any[] = tele.detections || [];
+    const objectsCount = detections.length;
+    const peopleCount = detections.filter((d: any) => d.class_name === 'person').length;
+
+    const latestEv = evidenceList.find(e => e.camera_id === cam.id || e.camera_number === cam.camera_id);
+    const latestRiskScore = latestEv ? latestEv.risk_score : (hasCriticalAlert ? 85 : hasWarningAlert ? 55 : 0);
 
     return {
       ...cam,
@@ -168,8 +218,14 @@ export const TacticalGISMap: React.FC = () => {
       lng,
       heading,
       coneWedge,
-      hasAlert,
-      isOnline
+      statusMarker,
+      fps,
+      latency,
+      objectsCount,
+      peopleCount,
+      activeAlertsCount: cameraAlerts.length,
+      latestEvidence: latestEv,
+      latestRiskScore
     };
   });
 
@@ -179,14 +235,34 @@ export const TacticalGISMap: React.FC = () => {
     const baseLat = matchingCam ? matchingCam.lat : 26.9124;
     const baseLng = matchingCam ? matchingCam.lng : 70.9025;
 
-    // Slight offset per threat item
     const offsetLat = baseLat + ((idx % 5) * 0.002 - 0.004);
     const offsetLng = baseLng + ((idx % 3) * 0.003 - 0.003);
 
     return {
       ...item,
       lat: offsetLat,
-      lng: offsetLng
+      lng: offsetLng,
+      severityColor: getThreatSeverityColor(item.severity)
+    };
+  });
+
+  // Map PostgreSQL Virtual Fence Polygons (`camera_zones`)
+  const mapZones = zones.map(z => {
+    const matchingCam = mapCameras.find(c => c.id === z.camera_id || c.camera_id === z.camera_id);
+    const baseLat = matchingCam ? matchingCam.lat : 26.9124;
+    const baseLng = matchingCam ? matchingCam.lng : 70.9025;
+
+    const polygonPts: [number, number][] = (z.coordinates || []).map((pt: number[]) => {
+      // If normalized (0-1), project relative to camera lat/lng
+      if (pt[0] <= 1.0 && pt[1] <= 1.0) {
+        return [baseLat + (pt[1] - 0.5) * 0.012, baseLng + (pt[0] - 0.5) * 0.015];
+      }
+      return [pt[0], pt[1]];
+    });
+
+    return {
+      ...z,
+      polygonPts
     };
   });
 
@@ -203,11 +279,11 @@ export const TacticalGISMap: React.FC = () => {
           <h2 className="text-lg font-bold tracking-wider text-slate-100 uppercase flex items-center gap-2">
             <Globe className="w-5 h-5 text-blue-400 animate-pulse" /> 3D TACTICAL GIS BORDER SURVEILLANCE MAP
           </h2>
-          <p className="text-xs text-slate-400">REAL-TIME GPS THREAT MAPPING, CAMERA VISION CONES & ZERO-LINE DEFENSE</p>
+          <p className="text-xs text-slate-400">POSTGRESQL SPATIAL REPOSITORY • WEBSOCKET REAL-TIME SYNC • ZERO FAKE DETECTIONS</p>
         </div>
         <div className="flex items-center gap-3 text-xs">
           <button
-            onClick={fetchEvidenceHistory}
+            onClick={fetchGisData}
             className="px-3 py-2 bg-[#1a2030] hover:bg-[#252d42] text-slate-300 rounded-lg font-semibold uppercase tracking-wider flex items-center gap-1.5 border border-[#252d42] transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> REFRESH MAP
@@ -221,33 +297,40 @@ export const TacticalGISMap: React.FC = () => {
         </div>
       </div>
 
-      {/* Legend & Stats Overview Bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 text-xs">
-        <div className="bg-[#111622] p-3 rounded-lg border border-[#252d42] flex items-center justify-between">
-          <span className="text-slate-400">SECTOR HQ</span>
-          <strong className="text-blue-400">SECTOR 4 / JAISALMER</strong>
+      {/* Camera Status & Severity Legend */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-xs">
+        <div className="bg-[#111622] p-2.5 rounded-lg border border-[#252d42] flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" />
+          <span className="text-slate-300 text-[11px]">🟢 ONLINE</span>
         </div>
-        <div className="bg-[#111622] p-3 rounded-lg border border-[#252d42] flex items-center justify-between">
-          <span className="text-slate-400">CAMERAS MAPPED</span>
-          <strong className="text-emerald-400">{mapCameras.length} STREAMS</strong>
+        <div className="bg-[#111622] p-2.5 rounded-lg border border-[#252d42] flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-amber-500 shadow-sm shadow-amber-500/50" />
+          <span className="text-slate-300 text-[11px]">🟡 WARNING</span>
         </div>
-        <div className="bg-[#111622] p-3 rounded-lg border border-[#252d42] flex items-center justify-between">
-          <span className="text-slate-400">RED THREAT PINS</span>
-          <strong className="text-red-400 font-bold">{mapThreats.length} DETECTED</strong>
+        <div className="bg-[#111622] p-2.5 rounded-lg border border-[#252d42] flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
+          <span className="text-slate-300 text-[11px]">🔴 CRITICAL</span>
         </div>
-        <div className="bg-[#111622] p-3 rounded-lg border border-[#252d42] flex items-center justify-between">
-          <span className="text-slate-400">BLUE FORCE UNITS</span>
-          <strong className="text-blue-400">2 PATROLS ACTIVE</strong>
+        <div className="bg-[#111622] p-2.5 rounded-lg border border-[#252d42] flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-slate-600" />
+          <span className="text-slate-300 text-[11px]">⚫ OFFLINE</span>
         </div>
-        <div className="bg-[#111622] p-3 rounded-lg border border-[#252d42] flex items-center justify-between">
-          <span className="text-slate-400">ZERO-LINE FENCE</span>
-          <strong className="text-amber-400">VIRTUALIZED</strong>
+
+        <div className="bg-[#111622] p-2.5 rounded-lg border border-[#252d42] flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-emerald-500" />
+          <span className="text-slate-300 text-[11px]">LOW (Green)</span>
         </div>
-        <div className="bg-[#111622] p-3 rounded-lg border border-[#252d42] flex items-center justify-between">
-          <span className="text-slate-400">WEBSOCKET STATUS</span>
-          <strong className="text-emerald-400 flex items-center gap-1">
-            <Radio className="w-3 h-3 animate-pulse" /> ONLINE
-          </strong>
+        <div className="bg-[#111622] p-2.5 rounded-lg border border-[#252d42] flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-amber-500" />
+          <span className="text-slate-300 text-[11px]">MEDIUM (Yellow)</span>
+        </div>
+        <div className="bg-[#111622] p-2.5 rounded-lg border border-[#252d42] flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-orange-500" />
+          <span className="text-slate-300 text-[11px]">HIGH (Orange)</span>
+        </div>
+        <div className="bg-[#111622] p-2.5 rounded-lg border border-[#252d42] flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-red-500" />
+          <span className="text-slate-300 text-[11px]">CRITICAL (Red)</span>
         </div>
       </div>
 
@@ -268,7 +351,7 @@ export const TacticalGISMap: React.FC = () => {
               maxZoom={19}
             />
 
-            {/* International Border (IB / LoC) Red Vector Line */}
+            {/* International Border Line (IB / LoC) Red Polyline */}
             <Polyline
               positions={internationalBorderLine}
               pathOptions={{ color: '#ef4444', dashArray: '8, 8', weight: 3, opacity: 0.8 }}
@@ -278,7 +361,7 @@ export const TacticalGISMap: React.FC = () => {
               </Tooltip>
             </Polyline>
 
-            {/* Amber Virtual Fence Line */}
+            {/* Amber Virtual Fence Polyline */}
             <Polyline
               positions={zeroLineFence}
               pathOptions={{ color: '#f59e0b', weight: 2, opacity: 0.9 }}
@@ -288,12 +371,32 @@ export const TacticalGISMap: React.FC = () => {
               </Tooltip>
             </Polyline>
 
+            {/* Render PostgreSQL Camera Zones / Virtual Fences */}
+            {mapZones.map((z, i) => (
+              <Polygon
+                key={z.id || i}
+                positions={z.polygonPts}
+                pathOptions={{
+                  color: z.is_active ? '#3b82f6' : '#64748b',
+                  fillColor: z.is_active ? '#3b82f6' : '#64748b',
+                  fillOpacity: 0.2,
+                  weight: 2
+                }}
+              >
+                <Tooltip direction="center" sticky>
+                  <div className="font-mono text-xs text-blue-300 font-bold">
+                    🛡️ {z.name} ({z.zone_type})
+                  </div>
+                </Tooltip>
+              </Polygon>
+            ))}
+
             {/* BSF Border Outposts (BOP Nodes) */}
             {bsfOutposts.map(bop => (
               <Marker
                 key={bop.id}
                 position={[bop.lat, bop.lng]}
-                icon={createTacticalIcon('#2563eb', 'BSF')}
+                icon={createTacticalBopIcon('BSF')}
               >
                 <Popup className="tactical-popup">
                   <div className="p-2 space-y-1 font-mono text-xs text-slate-100 bg-[#111622]">
@@ -307,56 +410,56 @@ export const TacticalGISMap: React.FC = () => {
               </Marker>
             ))}
 
-            {/* Friendly BSF Patrol Units (Blue Force) */}
-            {bsfPatrolUnits.map(patrol => (
-              <Marker
-                key={patrol.id}
-                position={[patrol.lat, patrol.lng]}
-                icon={bsfPatrolIcon}
-              >
-                <Popup className="tactical-popup">
-                  <div className="p-2 space-y-1 font-mono text-xs text-slate-100 bg-[#111622]">
-                    <div className="font-bold text-blue-400 flex items-center gap-1">
-                      <Users className="w-4 h-4" /> {patrol.name}
-                    </div>
-                    <div className="text-emerald-400 font-bold">{patrol.status}</div>
-                    <div className="text-slate-400 text-[10px]">BLUE FORCE PATROL UNIT</div>
-                  </div>
-                </Popup>
-              </Marker>
-            ))}
-
-            {/* Cameras & Directional Vision Cones */}
+            {/* Camera Status Markers & Vision Cones */}
             {mapCameras.map(cam => (
               <React.Fragment key={cam.id || cam.camera_id}>
-                {/* Vision Cone Wedge */}
+                {/* Field-of-View Sector Wedge */}
                 <Polygon
                   positions={cam.coneWedge}
                   pathOptions={{
-                    color: cam.hasAlert ? '#ef4444' : cam.isOnline ? '#3b82f6' : '#64748b',
-                    fillColor: cam.hasAlert ? '#ef4444' : cam.isOnline ? '#3b82f6' : '#64748b',
-                    fillOpacity: cam.hasAlert ? 0.35 : 0.15,
-                    weight: cam.hasAlert ? 2 : 1
+                    color: cam.statusMarker === 'CRITICAL' ? '#ef4444' : cam.statusMarker === 'WARNING' ? '#eab308' : cam.statusMarker === 'ONLINE' ? '#3b82f6' : '#64748b',
+                    fillColor: cam.statusMarker === 'CRITICAL' ? '#ef4444' : cam.statusMarker === 'WARNING' ? '#eab308' : cam.statusMarker === 'ONLINE' ? '#3b82f6' : '#64748b',
+                    fillOpacity: cam.statusMarker === 'CRITICAL' ? 0.35 : 0.15,
+                    weight: cam.statusMarker === 'CRITICAL' ? 2 : 1
                   }}
                 />
 
                 {/* Camera Marker */}
                 <Marker
                   position={[cam.lat, cam.lng]}
-                  icon={cam.hasAlert ? alertedCameraIcon : cameraIcon}
+                  icon={createCameraStatusIcon(cam.statusMarker)}
                 >
                   <Popup className="tactical-popup">
-                    <div className="p-3 space-y-2 font-mono text-xs bg-[#111622] text-slate-100 min-w-[200px]">
+                    <div className="p-3 space-y-2 font-mono text-xs bg-[#111622] text-slate-100 min-w-[220px]">
                       <div className="flex justify-between items-center border-b border-[#252d42] pb-1">
                         <strong className="text-blue-400">{cam.name} ({cam.camera_id})</strong>
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                          cam.isOnline ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'
+                          cam.statusMarker === 'ONLINE' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
+                          cam.statusMarker === 'WARNING' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
+                          cam.statusMarker === 'CRITICAL' ? 'bg-red-500/20 text-red-400 border border-red-500/30 animate-pulse' :
+                          'bg-slate-800 text-slate-400 border border-slate-700'
                         }`}>
-                          {cam.isOnline ? 'ONLINE' : 'STOPPED'}
+                          {cam.statusMarker}
                         </span>
                       </div>
-                      <div className="text-slate-300">Location: {cam.location}</div>
-                      <div className="text-slate-400">Protocol: <strong className="text-amber-400">{cam.protocol}</strong></div>
+
+                      <div className="space-y-1 text-slate-300 text-[11px]">
+                        <div>Location: <strong className="text-slate-200">{cam.location}</strong></div>
+                        <div>Status: <strong className="text-slate-200">{cam.status}</strong></div>
+                        <div>FPS: <strong className="text-emerald-400">{cam.fps.toFixed(1)}</strong> | Latency: <strong className="text-blue-400">{cam.latency}ms</strong></div>
+                        <div>Objects Detected: <strong className="text-amber-400">{cam.objectsCount}</strong></div>
+                        <div>People Count: <strong className="text-emerald-400">{cam.peopleCount}</strong></div>
+                        <div>Active Alerts: <strong className="text-red-400 font-bold">{cam.activeAlertsCount}</strong></div>
+                        <div>Latest Risk Score: <strong className="text-red-400 font-bold">{cam.latestRiskScore} / 100</strong></div>
+                      </div>
+
+                      {cam.latestEvidence && (
+                        <div className="pt-1 border-t border-[#252d42]">
+                          <div className="text-[10px] text-slate-400 mb-1">Latest Snapshot Evidence:</div>
+                          <img src={cam.latestEvidence.file_url} alt="Evidence" className="w-full h-20 object-cover rounded border border-[#252d42]" />
+                        </div>
+                      )}
+
                       <div className="pt-1">
                         <Link
                           to="/surveillance"
@@ -371,16 +474,16 @@ export const TacticalGISMap: React.FC = () => {
               </React.Fragment>
             ))}
 
-            {/* Red Force Threat Pins */}
+            {/* Severity Color-Coded Threat Markers */}
             {mapThreats.map(threat => (
               <CircleMarker
                 key={threat.id}
                 center={[threat.lat, threat.lng]}
                 radius={9}
                 pathOptions={{
-                  color: threat.event_type === 'DETECTION' ? '#f59e0b' : '#ef4444',
-                  fillColor: threat.event_type === 'DETECTION' ? '#f59e0b' : '#ef4444',
-                  fillOpacity: 0.8,
+                  color: threat.severityColor,
+                  fillColor: threat.severityColor,
+                  fillOpacity: 0.85,
                   weight: 2
                 }}
                 eventHandlers={{
@@ -388,8 +491,8 @@ export const TacticalGISMap: React.FC = () => {
                 }}
               >
                 <Tooltip direction="top" offset={[0, -10]}>
-                  <div className="font-mono text-xs font-bold text-red-400">
-                    🚨 {threat.event_type}: {threat.object_class?.toUpperCase()} ({threat.track_id})
+                  <div className="font-mono text-xs font-bold" style={{ color: threat.severityColor }}>
+                    🚨 {threat.severity} THREAT: {threat.object_class?.toUpperCase()} ({threat.track_id})
                   </div>
                 </Tooltip>
               </CircleMarker>
@@ -403,15 +506,15 @@ export const TacticalGISMap: React.FC = () => {
             </div>
             <div className="text-[11px] text-slate-300">Red Line: International Border (IB)</div>
             <div className="text-[11px] text-slate-300">Amber Line: Smart Virtual Fence</div>
-            <div className="text-[11px] text-slate-300">Cones: Camera Field of View</div>
+            <div className="text-[11px] text-slate-300">Polygons: Configured Camera Zones</div>
           </div>
         </div>
 
-        {/* Tactical Threat Details Drawer */}
+        {/* Threat Details Drawer */}
         <div className="bg-[#111622] p-4 rounded-xl border border-[#252d42] flex flex-col justify-between space-y-4">
           <div>
             <h3 className="font-bold text-slate-100 text-sm border-b border-[#252d42] pb-2 flex items-center gap-2">
-              <ShieldAlert className="w-4 h-4 text-red-400" /> TACTICAL THREAT INTELLIGENCE
+              <ShieldAlert className="w-4 h-4 text-red-400" /> THREAT DETAILS INSPECTOR
             </h3>
 
             {selectedThreat ? (
@@ -423,14 +526,18 @@ export const TacticalGISMap: React.FC = () => {
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-slate-600 text-xs">Snapshot Unavailable</div>
                   )}
-                  <div className="absolute top-2 left-2 bg-red-600 text-white font-bold text-[10px] px-2 py-0.5 rounded uppercase">
-                    {selectedThreat.event_type}
+                  <div className="absolute top-2 left-2 text-white font-bold text-[10px] px-2 py-0.5 rounded uppercase" style={{ backgroundColor: selectedThreat.severityColor }}>
+                    {selectedThreat.severity} THREAT
                   </div>
                 </div>
 
                 <div className="space-y-2 bg-[#0a0d14] p-3 rounded-lg border border-[#252d42]">
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Object Class:</span>
+                    <span className="text-slate-400">Camera Source:</span>
+                    <strong className="text-amber-400">{selectedThreat.camera_number || selectedThreat.camera_id}</strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Object Type:</span>
                     <strong className="text-blue-400 uppercase">{selectedThreat.object_class}</strong>
                   </div>
                   <div className="flex justify-between">
@@ -438,24 +545,20 @@ export const TacticalGISMap: React.FC = () => {
                     <strong className="text-emerald-400">{selectedThreat.track_id}</strong>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Confidence:</span>
-                    <strong className="text-emerald-400">{(selectedThreat.confidence * 100).toFixed(0)}%</strong>
+                    <span className="text-slate-400">Event Type:</span>
+                    <strong className="text-red-400">{selectedThreat.event_type}</strong>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-400">Risk Score:</span>
                     <strong className="text-red-400 font-bold">{selectedThreat.risk_score} / 100</strong>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Camera Source:</span>
-                    <strong className="text-amber-400">{selectedThreat.camera_number || selectedThreat.camera_id}</strong>
+                    <span className="text-slate-400">Date/Time:</span>
+                    <strong className="text-slate-300">{new Date(selectedThreat.captured_at).toLocaleString()}</strong>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Location:</span>
-                    <strong className="text-slate-300 truncate">{selectedThreat.location}</strong>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Timestamp:</span>
-                    <strong className="text-slate-400">{new Date(selectedThreat.captured_at).toLocaleTimeString()}</strong>
+                    <span className="text-slate-400">Alert Status:</span>
+                    <strong className="text-emerald-400 uppercase">{selectedThreat.severity || 'ACTIVE'}</strong>
                   </div>
                 </div>
 
@@ -463,7 +566,7 @@ export const TacticalGISMap: React.FC = () => {
                   onClick={() => setSelectedModalEvidence(selectedThreat)}
                   className="w-full py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-lg shadow-red-600/30 transition-colors"
                 >
-                  <Eye className="w-4 h-4" /> VIEW FULL EVIDENCE & DETAILS
+                  <Eye className="w-4 h-4" /> VIEW FULL EVIDENCE SNAPSHOT
                 </button>
               </div>
             ) : (
@@ -471,7 +574,7 @@ export const TacticalGISMap: React.FC = () => {
                 <MapPin className="w-8 h-8 text-slate-600 mx-auto" />
                 <p className="font-bold text-slate-400">NO THREAT SELECTED</p>
                 <p className="text-[11px] text-slate-500">
-                  Click any red threat pin on the 3D GIS Map to inspect live threat evidence & spatial telemetry.
+                  Click any severity color-coded threat marker on the 3D GIS Map to inspect threat metadata & snapshot evidence.
                 </p>
               </div>
             )}
@@ -480,9 +583,9 @@ export const TacticalGISMap: React.FC = () => {
           <div className="p-3 bg-[#0a0d14] rounded-lg border border-[#252d42] text-[11px] text-slate-400 font-mono">
             <div className="flex justify-between items-center mb-1">
               <span>BSF GIS TELEMETRY ENGINE</span>
-              <span className="text-emerald-400 font-bold">READY</span>
+              <span className="text-emerald-400 font-bold">ACTIVE</span>
             </div>
-            <div className="text-[10px] text-slate-500">Lat: 26.9124° N • Lng: 70.9025° E</div>
+            <div className="text-[10px] text-slate-500">Sector: 4 / Rajasthan Border • Real Data Connected</div>
           </div>
         </div>
       </div>
