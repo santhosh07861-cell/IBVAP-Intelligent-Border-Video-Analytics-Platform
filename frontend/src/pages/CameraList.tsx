@@ -77,6 +77,12 @@ export const CameraList: React.FC = () => {
     setTestResult(null);
     setErrorMessage(null);
 
+    let urlToTest = form.stream_url.trim ? form.stream_url.trim() : form.stream_url;
+    if ((urlToTest.startsWith('http://') || urlToTest.startsWith('https://')) && !urlToTest.includes('/video') && !urlToTest.includes('/shot.jpg') && !urlToTest.endsWith('.mp4')) {
+      urlToTest = urlToTest.replace(/\/$/, '') + '/video';
+      setForm(prev => ({ ...prev, stream_url: urlToTest }));
+    }
+
     try {
       const res = await fetch('/api/cameras/test-connection', {
         method: 'POST',
@@ -86,18 +92,24 @@ export const CameraList: React.FC = () => {
         },
         body: JSON.stringify({
           protocol: form.protocol,
-          stream_url: form.stream_url
+          stream_url: urlToTest
         })
       });
-      if (res.ok) {
-        const data = await res.json();
+
+      const rawTxt = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(rawTxt); } catch(e) {}
+
+      if (!res.ok) {
+        setErrorMessage(data.detail || data.message || `Failed to connect to stream at ${urlToTest}`);
+      } else {
         setTestResult(data);
         if (data.status === 'FAILED') {
           setErrorMessage(data.message);
         }
       }
     } catch (e: any) {
-      setErrorMessage('Failed to test connection to stream source.');
+      setErrorMessage('Failed to test connection to stream source. Ensure backend server is running.');
     } finally {
       setTesting(false);
     }
@@ -109,7 +121,12 @@ export const CameraList: React.FC = () => {
     setWebcamStatus(null);
 
     const cid = form.camera_id || `CAM-${Date.now().toString().slice(-4)}`;
-    const camName = form.name || `Webcam ${cid}`;
+    const camName = form.name || `Camera ${cid}`;
+
+    let urlToSave = form.stream_url.trim();
+    if ((urlToSave.startsWith('http://') || urlToSave.startsWith('https://')) && !urlToSave.includes('/video') && !urlToSave.includes('/shot.jpg') && !urlToSave.endsWith('.mp4')) {
+      urlToSave = urlToSave.replace(/\/$/, '') + '/video';
+    }
 
     if (form.protocol === 'WEBCAM') {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -147,7 +164,8 @@ export const CameraList: React.FC = () => {
         body: JSON.stringify({
           ...form,
           camera_id: cid,
-          name: camName
+          name: camName,
+          stream_url: urlToSave
         })
       });
 
@@ -183,7 +201,15 @@ export const CameraList: React.FC = () => {
       });
 
       if (!startRes.ok) {
-        console.warn(`Camera created, but start stream returned status ${startRes.status}`);
+        const rawStart = await startRes.text();
+        let startErr = rawStart;
+        try {
+          const parsed = JSON.parse(rawStart);
+          if (parsed.detail) startErr = parsed.detail;
+        } catch(jsonErr) {}
+        setErrorMessage(`CANNOT CONNECT TO STREAM: ${startErr}`);
+        fetchCameras();
+        return; // Keep modal open so user sees exact error message!
       }
 
       setShowModal(false);
