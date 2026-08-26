@@ -76,8 +76,19 @@ class WebcamVideoSource(VideoSource):
 
     def _connect(self):
         self.status = "CONNECTING"
+        # Try default backend first
         self.cap = cv2.VideoCapture(self.device_index)
+        if not self.cap.isOpened():
+            # Try AVFoundation backend explicitly for macOS
+            self.cap = cv2.VideoCapture(self.device_index, cv2.CAP_AVFOUNDATION)
+
         if self.cap.isOpened():
+            # Warm up camera hardware sensor (read initial frames)
+            for _ in range(5):
+                ret, frame = self.cap.read()
+                if ret and frame is not None:
+                    self.status = "ONLINE"
+                    return
             self.status = "ONLINE"
         else:
             self.status = "OFFLINE"
@@ -89,18 +100,33 @@ class WebcamVideoSource(VideoSource):
                 return False, None
 
         ret, frame = self.cap.read()
-        if ret:
+        if not ret or frame is None:
+            # Retry up to 3 times for transient hardware read glitches
+            for _ in range(3):
+                time.sleep(0.01)
+                ret, frame = self.cap.read()
+                if ret and frame is not None:
+                    break
+
+        if ret and frame is not None:
             self.last_frame_time = time.time()
             self.status = "ONLINE"
+            self.dropped_frames = 0
         else:
             self.dropped_frames += 1
-            self.status = "DEGRADED"
+            if self.dropped_frames > 15:
+                # Trigger automatic reconnection if dropped frames persist
+                logger.warning(f"Webcam {self.camera_id} dropped {self.dropped_frames} frames. Triggering reconnect.")
+                self.release()
+                self._connect()
+
         return ret, frame
 
     def release(self):
         if self.cap:
             self.cap.release()
-            self.status = "OFFLINE"
+            self.cap = None
+        self.status = "OFFLINE"
 
 class RTSPVideoSource(VideoSource):
     """
