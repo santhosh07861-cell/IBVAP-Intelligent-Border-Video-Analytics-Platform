@@ -416,9 +416,10 @@ def unsubscribe_camera(camera_id: str, subscription_id: str):
 from fastapi.responses import StreamingResponse
 
 @router.get("/{camera_id}/stream")
-def get_camera_stream(camera_id: str):
+async def get_camera_stream(camera_id: str):
     """
     Streams real-time MJPEG video frames from active StreamWorker with automatic subscription lifecycle tracking.
+    Uses async frame_generator to prevent blocking Starlette's worker threadpool.
     """
     from backend.main import manager as ws_manager
     from backend.stream_manager import stream_manager
@@ -428,7 +429,7 @@ def get_camera_stream(camera_id: str):
     # Automatically subscribe on connection
     stream_manager.subscribe(cid, sub_id, ws_manager)
 
-    def frame_generator():
+    async def frame_generator():
         try:
             while True:
                 worker = stream_manager.workers.get(cid)
@@ -437,7 +438,7 @@ def get_camera_stream(camera_id: str):
                     if jpeg_bytes:
                         yield (b'--frame\r\n'
                                b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
-                time.sleep(0.04)
+                await asyncio.sleep(0.04)
         finally:
             # Automatically unsubscribe when HTTP stream connection drops
             stream_manager.unsubscribe(cid, sub_id)

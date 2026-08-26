@@ -70,12 +70,13 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         try {
           if (event.data !== 'pong') {
             const data: DetectionMessage = JSON.parse(event.data);
-            setLastMessage(data);
-
             if (data.type === 'ALERT_NEW') {
               const alertObj = data.alert || data;
               setLastAlert(alertObj);
+              setLastMessage(data);
               playDangerAlarmSound();
+            } else if (data.type === 'EVIDENCE_NEW') {
+              setLastMessage(data);
             }
 
             if (data.type === 'DETECTIONS_UPDATE' && data.camera_id) {
