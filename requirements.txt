@@ -1,0 +1,15 @@
+fastapi>=0.110.0
+uvicorn>=0.28.0
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+pyjwt>=2.8.0
+passlib>=1.7.4
+bcrypt>=4.1.0
+opencv-python>=4.9.0
+numpy>=1.26.0
+pillow>=10.2.0
+requests>=2.31.0
+websockets>=12.0
+pytest>=8.0.0

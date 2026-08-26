@@ -1,0 +1,22 @@
+{
+  "system_name": "IBVAP - Intelligent Border Video Analytics Platform",
+  "version": "1.0.0",
+  "organization": "Border Security Force / SIH 2026",
+  "risk_weights": {
+    "night_mode": 20,
+    "restricted_zone": 30,
+    "fence_crossing": 30,
+    "loitering": 10,
+    "repeated_crossing": 15,
+    "vehicle_stopping": 15,
+    "crowd_threshold": 10
+  },
+  "default_night_hours": {
+    "start": 20,
+    "end": 6
+  },
+  "evidence": {
+    "pre_event_seconds": 5,
+    "post_event_seconds": 15
+  }
+}

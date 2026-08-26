@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://ibvap:ibvap_pass@postgres:5432/ibvap
+      - JWT_SECRET=ibvap_super_secret_jwt_key_2026_sih_border_surveillance
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./storage:/app/storage
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ibvap
+      POSTGRES_USER: ibvap
+      POSTGRES_PASSWORD: ibvap_pass
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ibvap"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
