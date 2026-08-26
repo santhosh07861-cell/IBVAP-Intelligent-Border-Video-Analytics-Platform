@@ -6,6 +6,7 @@ from sqlalchemy import func
 from database.connection import get_db
 from database.schema import Camera, Alert, Incident, Detection, Event, ANPRResult, AuditLog
 from backend.stream_manager import stream_manager
+from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api/analytics", tags=["Analytics & KPIs"])
 

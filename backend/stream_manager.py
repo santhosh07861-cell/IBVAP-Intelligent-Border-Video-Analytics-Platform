@@ -204,7 +204,7 @@ class StreamManager:
             db = SessionLocal()
             try:
                 cam = db.query(Camera).filter((Camera.camera_id == camera_id) | (Camera.id == camera_id)).first()
-                if cam and websocket_manager:
+                if cam and cam.status != "STOPPED" and websocket_manager:
                     self.start_stream(cam.camera_id, cam.protocol, cam.stream_url, websocket_manager)
             except Exception as e:
                 logger.error(f"Error starting stream on subscribe for {camera_id}: {e}")
@@ -263,9 +263,15 @@ class StreamManager:
             t.start()
 
     def stop_stream(self, camera_id: str):
-        if camera_id in self.workers:
-            self.workers[camera_id].stop()
-            del self.workers[camera_id]
+        keys_to_stop = []
+        for key, worker in list(self.workers.items()):
+            if key == camera_id or worker.camera_id == camera_id:
+                keys_to_stop.append(key)
+
+        for key in keys_to_stop:
+            if key in self.workers:
+                self.workers[key].stop()
+                del self.workers[key]
 
     def stop_all(self):
         for cid, worker in list(self.workers.items()):

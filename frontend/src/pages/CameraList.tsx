@@ -236,13 +236,35 @@ export const CameraList: React.FC = () => {
   const handleStopStream = async (cameraId: string) => {
     try {
       setErrorMessage(null);
-      await fetch(`/api/cameras/${cameraId}/stop`, {
+      // Optimistic UI state update immediately for instant feedback
+      setCameras(prev => prev.map(c => (c.camera_id === cameraId || c.id === cameraId) ? { ...c, status: 'STOPPED', fps: 0 } : c));
+
+      const res = await fetch(`/api/cameras/${cameraId}/stop`, {
         method: 'POST',
         headers: getAuthHeaders()
       });
-      fetchCameras();
+
+      if (!res.ok) {
+        const text = await res.text();
+        let errMsg = text || res.statusText;
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.detail) errMsg = parsed.detail;
+        } catch(e) {}
+
+        if (res.status === 401) {
+          setErrorMessage('SESSION EXPIRED: Please log out (top-right icon) and log back in.');
+        } else {
+          setErrorMessage(`Failed to stop camera: ${errMsg}`);
+        }
+        fetchCameras();
+      } else {
+        fetchCameras();
+      }
     } catch (e: any) {
       console.error(e);
+      setErrorMessage(e.message || 'Error stopping camera.');
+      fetchCameras();
     }
   };
 

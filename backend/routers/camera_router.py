@@ -292,6 +292,7 @@ def stop_camera(camera_id: str, db: Session = Depends(get_db), current_user = De
 
     from backend.stream_manager import stream_manager
     stream_manager.stop_stream(cam.camera_id)
+    stream_manager.stop_stream(cam.id)
 
     cam.status = "STOPPED"
     cam.fps = 0.0
