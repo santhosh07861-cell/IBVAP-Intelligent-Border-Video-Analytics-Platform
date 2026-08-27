@@ -1,80 +1,92 @@
 import os
 import logging
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
 
+# Load environment variables from .env manually without external dependency
+if os.path.exists(".env"):
+    try:
+        with open(".env", "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+    except Exception:
+        pass
+
 logger = logging.getLogger(__name__)
 
-# Primary Live Operational Database URL (Default: PostgreSQL)
 DEFAULT_PG_URL = "postgresql://postgres:postgres@localhost:5432/ibvap"
 DEFAULT_SQLITE_URL = "sqlite:///./ibvap.db"
 
-DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_PG_URL)
+# Prefer explicit env variable, default to SQLite if not specified or PG not configured
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_SQLITE_URL)
 
-# Fallback to local OS user if default postgres role requires alternate socket
-if "postgres:postgres" in DATABASE_URL:
-    alt_url = f"postgresql://{os.getenv('USER', 'postgres')}@localhost:5432/ibvap"
-else:
-    alt_url = DEFAULT_PG_URL
-
-connect_args = {}
-if DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False, "timeout": 30}
-
-try:
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args=connect_args,
+def _make_sqlite_engine(url: str):
+    eng = create_engine(
+        url,
+        connect_args={"check_same_thread": False, "timeout": 15},
         poolclass=NullPool,
         echo=False
     )
-    # Validate connection immediately
+    @event.listens_for(eng, "connect")
+    def set_sqlite_pragmas(dbapi_conn, connection_record):
+        try:
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
+        except Exception:
+            pass
+    return eng
+
+def _make_pg_engine(url: str):
+    return create_engine(
+        url,
+        connect_args={"connect_timeout": 2},
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,
+        echo=False
+    )
+
+engine = None
+
+if DATABASE_URL.startswith("sqlite"):
+    engine = _make_sqlite_engine(DATABASE_URL)
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-    
-    db_engine_name = "SQLite" if DATABASE_URL.startswith("sqlite") else "PostgreSQL"
-    logger.info(f"DATABASE ENGINE: {db_engine_name}")
+    logger.info("DATABASE ENGINE: SQLite")
     logger.info("DATABASE STATUS: CONNECTED")
-    print(f"DATABASE ENGINE: {db_engine_name}")
+    print("DATABASE ENGINE: SQLite")
     print("DATABASE STATUS: CONNECTED")
-
-except Exception as err:
-    if not DATABASE_URL.startswith("sqlite"):
-        # Try alternative local user socket before falling back to SQLite
-        try:
-            engine = create_engine(
-                alt_url,
-                connect_args={},
-                poolclass=NullPool,
-                echo=False
-            )
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            logger.info("DATABASE ENGINE: PostgreSQL")
-            logger.info("DATABASE STATUS: CONNECTED")
-            print("DATABASE ENGINE: PostgreSQL")
-            print("DATABASE STATUS: CONNECTED")
-            DATABASE_URL = alt_url
-        except Exception as err2:
-            logger.warning(f"PostgreSQL connection failed ({err2}). Falling back to SQLite.")
-            print(f"DATABASE WARNING: PostgreSQL failed ({err2}). Falling back to SQLite database ({DEFAULT_SQLITE_URL}).")
-            DATABASE_URL = DEFAULT_SQLITE_URL
-            engine = create_engine(
-                DATABASE_URL,
-                connect_args={"check_same_thread": False, "timeout": 30},
-                poolclass=NullPool,
-                echo=False
-            )
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            logger.info("DATABASE ENGINE: SQLite (Fallback)")
-            logger.info("DATABASE STATUS: CONNECTED")
-            print("DATABASE ENGINE: SQLite (Fallback)")
-            print("DATABASE STATUS: CONNECTED")
-    else:
-        logger.error(f"SQLite connection failed: {err}")
-        raise err
+else:
+    # Try PostgreSQL, fallback to SQLite if connection fails
+    try:
+        engine = _make_pg_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        logger.info("DATABASE ENGINE: PostgreSQL")
+        logger.info("DATABASE STATUS: CONNECTED")
+        print("DATABASE ENGINE: PostgreSQL")
+        print("DATABASE STATUS: CONNECTED")
+    except Exception as err:
+        logger.warning(f"PostgreSQL failed ({err}). Falling back to SQLite ({DEFAULT_SQLITE_URL}).")
+        print(f"DATABASE WARNING: PostgreSQL failed. Falling back to SQLite ({DEFAULT_SQLITE_URL}).")
+        DATABASE_URL = DEFAULT_SQLITE_URL
+        engine = _make_sqlite_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        logger.info("DATABASE ENGINE: SQLite (Fallback)")
+        logger.info("DATABASE STATUS: CONNECTED")
+        print("DATABASE ENGINE: SQLite (Fallback)")
+        print("DATABASE STATUS: CONNECTED")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

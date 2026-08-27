@@ -28,7 +28,7 @@ const NavbarComponent: React.FC = () => {
     setMuted(newMuted);
   };
 
-  const inferenceMode = lastMessage?.inference_mode || "REAL AI | INFERENCE RUNNING";
+  const inferenceMode = lastMessage?.inference_mode || (isConnected ? "AI ENGINE STANDBY" : "OFFLINE");
 
   return (
     <header className="h-16 bg-[#111622] border-b border-[#252d42] px-4 flex items-center justify-between sticky top-0 z-50">

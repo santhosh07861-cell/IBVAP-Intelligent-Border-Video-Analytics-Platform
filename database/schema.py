@@ -184,14 +184,37 @@ class ANPRResult(Base):
     full_frame_url = Column(String(500))
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
+class FaceWatchlist(Base):
+    __tablename__ = "face_watchlist"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    name = Column(String(100), nullable=False)
+    person_id = Column(String(50), unique=True, nullable=False, index=True)  # ID / badge / case number
+    category = Column(String(50), default="WATCHLIST")  # VIP, SECURITY, WATCHLIST, PERSON_OF_INTEREST, BANNED
+    photo_url = Column(String(500), nullable=True)
+    embedding = Column(JSON, nullable=False)  # 128-d L2-normalized float list
+    is_active = Column(Boolean, default=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class FaceDetection(Base):
     __tablename__ = "face_detections"
     id = Column(String, primary_key=True, default=generate_uuid)
     camera_id = Column(String, ForeignKey("cameras.id"), index=True)
-    bbox = Column(JSON, nullable=False)
-    confidence = Column(Float, default=0.92)
-    crop_url = Column(String(500))
+    track_id = Column(Integer, nullable=True, index=True)
+    identity_id = Column(String, ForeignKey("face_watchlist.id"), nullable=True)
+    identity_name = Column(String(100), nullable=True)
+    recognition_status = Column(String(30), default="UNKNOWN")  # KNOWN, UNKNOWN, UNCERTAIN
+    detection_confidence = Column(Float, default=0.90)
+    recognition_confidence = Column(Float, default=0.0)
+    bbox = Column(JSON, nullable=False)  # [x, y, w, h] normalized (0-1)
+    landmarks = Column(JSON, nullable=True)  # 5 landmarks [[x,y],...]
+    crop_url = Column(String(500), nullable=True)
+    snapshot_url = Column(String(500), nullable=True)
+    quality_score = Column(Float, default=0.85)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+
+    watchlist_entry = relationship("FaceWatchlist")
 
 class BehaviorEvent(Base):
     __tablename__ = "behavior_events"

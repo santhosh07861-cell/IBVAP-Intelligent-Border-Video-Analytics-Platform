@@ -12,6 +12,17 @@ interface LiveVideoCanvasProps {
     dwell_time_sec: number;
     is_fallback: boolean;
   }>;
+  faces?: Array<{
+    track_id: number;
+    bbox: number[];
+    landmarks?: number[][];
+    confidence: number;
+    quality_score?: number;
+    recognition_status: string;
+    identity_id?: string | null;
+    identity_name?: string | null;
+    recognition_confidence?: number;
+  }>;
   fps?: number;
   latencyMs?: number;
   inferenceMode?: string;
@@ -22,6 +33,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
   cameraId,
   cameraName,
   detections = [],
+  faces = [],
   fps = 0.0,
   latencyMs = 0.0,
   inferenceMode,
@@ -158,6 +170,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
 
       // 4. Render Dynamic Bounding Boxes & Inactive Card State
       const activeDets = detections || [];
+      const activeFaces = faces || [];
 
       if (!isStreaming) {
         ctx.save();
@@ -177,6 +190,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       }
 
       if (isStreaming) {
+        // A. Person & Object Bounding Boxes
         activeDets.forEach((det) => {
           const [nx, ny, nw, nh] = det.bbox;
           const bx = nx * w;
@@ -205,6 +219,51 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
 
           ctx.fillStyle = '#ffffff';
           ctx.fillText(labelText, bx + 4, by - 5);
+        });
+
+        // B. Real Face Bounding Boxes & Recognition Badges
+        activeFaces.forEach((face) => {
+          const [nx, ny, nw, nh] = face.bbox;
+          const fx = nx * w;
+          const fy = ny * h;
+          const fw = nw * w;
+          const fh = nh * h;
+
+          const isKnown = face.recognition_status === 'KNOWN';
+          const isUncertain = face.recognition_status === 'UNCERTAIN';
+          const faceColor = isKnown ? '#10b981' : isUncertain ? '#f59e0b' : '#38bdf8';
+
+          // Face box
+          ctx.strokeStyle = faceColor;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(fx, fy, fw, fh);
+
+          // Face landmarks (5 dots)
+          if (face.landmarks && Array.isArray(face.landmarks)) {
+            ctx.fillStyle = '#facc15';
+            face.landmarks.forEach((lm) => {
+              const lx = lm[0] * w;
+              const ly = lm[1] * h;
+              ctx.beginPath();
+              ctx.arc(lx, ly, 2, 0, Math.PI * 2);
+              ctx.fill();
+            });
+          }
+
+          // Face Label
+          let faceLabel = `#F${face.track_id} UNKNOWN ${(face.confidence * 100).toFixed(0)}%`;
+          if (isKnown && face.identity_name) {
+            faceLabel = `#F${face.track_id} KNOWN: ${face.identity_name.toUpperCase()} (${(face.recognition_confidence * 100).toFixed(0)}%)`;
+          } else if (isUncertain) {
+            faceLabel = `#F${face.track_id} UNCERTAIN (LOW QUAL)`;
+          }
+
+          ctx.font = 'bold 10px monospace';
+          const labelWidth = ctx.measureText(faceLabel).width;
+          ctx.fillStyle = faceColor;
+          ctx.fillRect(fx, fy - 18, labelWidth + 6, 18);
+          ctx.fillStyle = isKnown ? '#022c22' : '#0f172a';
+          ctx.fillText(faceLabel, fx + 3, fy - 5);
         });
       }
 
@@ -319,7 +378,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
           <span>OBJECTS: <strong className={isStreaming ? 'text-amber-400' : 'text-slate-500'}>{isStreaming ? (detections ? detections.length : 0) + ' Active' : 0}</strong></span>
         </div>
         <span className={isStreaming ? 'text-emerald-400 font-bold tracking-wider font-mono' : 'text-slate-500 font-mono'}>
-          {isStreaming ? (inferenceMode || 'REAL AI | INFERENCE RUNNING') : 'NO ACTIVE STREAM'}
+          {isStreaming ? (inferenceMode || 'REAL AI | INFERENCE RUNNING') : 'CAMERA OFFLINE | AI INFERENCE STOPPED'}
         </span>
       </div>
     </div>

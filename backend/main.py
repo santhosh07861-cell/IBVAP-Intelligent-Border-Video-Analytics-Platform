@@ -49,7 +49,11 @@ app.add_middleware(
 
 # Serve evidence static files
 os.makedirs("storage/evidence/snapshots", exist_ok=True)
+os.makedirs("storage/evidence/face/snapshots", exist_ok=True)
+os.makedirs("storage/evidence/face/crops", exist_ok=True)
+os.makedirs("storage/evidence/face/watchlist", exist_ok=True)
 app.mount("/static/evidence", StaticFiles(directory="storage/evidence/snapshots"), name="evidence")
+app.mount("/static/face", StaticFiles(directory="storage/evidence/face"), name="face_static")
 
 from fastapi.responses import RedirectResponse, HTMLResponse
 

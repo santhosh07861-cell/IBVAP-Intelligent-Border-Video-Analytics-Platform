@@ -44,6 +44,7 @@ class StreamWorker:
         self.last_db_update_time = 0.0
         self.last_status = "OFFLINE"
         self.latest_tracked_objs = []
+        self.latest_face_objs = []
         self.latest_latency_ms = 0.0
 
     def _create_source(self) -> VideoSource:
@@ -64,8 +65,9 @@ class StreamWorker:
         self.is_inferencing = True
         try:
             async with GLOBAL_INFERENCE_SEMAPHORE:
-                objs, lat, conf = await self.agent.process_frame(frame, loop_start)
+                objs, lat, conf, faces = await self.agent.process_frame(frame, loop_start)
                 self.latest_tracked_objs = objs
+                self.latest_face_objs = faces
                 self.latest_latency_ms = lat
                 self.last_ai_time = time.time()
         except Exception as e:
@@ -77,7 +79,8 @@ class StreamWorker:
         self.is_running = True
         logger.info(f"Starting StreamWorker for {self.camera_id} ({self.source_type}: {self.source_path})")
 
-        self.source = self._create_source()
+        loop = asyncio.get_running_loop()
+        self.source = await loop.run_in_executor(None, self._create_source)
         frame_count = 0
         start_time = time.time()
 
@@ -85,7 +88,7 @@ class StreamWorker:
 
         while self.is_running:
             loop_start = time.time()
-            ret, frame = self.source.read_frame()
+            ret, frame = await loop.run_in_executor(None, self.source.read_frame)
 
             if not ret or frame is None:
                 if self.source.status != "ONLINE":
@@ -128,6 +131,7 @@ class StreamWorker:
                     "timestamp": datetime.utcnow().isoformat(),
                     "inference_mode": "REAL AI | INFERENCE RUNNING",
                     "detections": dets_payload,
+                    "faces": self.latest_face_objs,
                     "fps": current_fps,
                     "latency_ms": self.latest_latency_ms
                 }

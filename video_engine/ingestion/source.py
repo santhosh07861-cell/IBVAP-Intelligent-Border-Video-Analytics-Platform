@@ -153,7 +153,9 @@ class RTSPVideoSource(VideoSource):
         self.reconnect_attempts += 1
         self.status = "CONNECTING"
 
-        # OpenCV ffmpeg RTSP environment options
+        # OpenCV ffmpeg RTSP environment options: 2s timeout & TCP transport
+        import os
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;2000000|rw_timeout;2000000"
         self.cap = cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
         if self.cap.isOpened():
             self.status = "ONLINE"

@@ -65,5 +65,12 @@ scratch/
 # Storage uploads / temporary snapshot evidence (keep folder structure)
 storage/uploads/*
 storage/evidence/snapshots/*
+storage/evidence/face/snapshots/*
+storage/evidence/face/crops/*
+storage/evidence/face/watchlist/*
+storage/test_face_subject.jpg
 !storage/uploads/.gitkeep
 !storage/evidence/snapshots/.gitkeep
+!storage/evidence/face/snapshots/.gitkeep
+!storage/evidence/face/crops/.gitkeep
+!storage/evidence/face/watchlist/.gitkeep

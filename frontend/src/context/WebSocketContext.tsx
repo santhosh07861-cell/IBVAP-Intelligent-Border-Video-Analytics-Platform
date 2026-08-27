@@ -14,10 +14,32 @@ export interface DetectionMessage {
     dwell_time_sec: number;
     is_fallback: boolean;
   }>;
+  faces?: Array<{
+    track_id: number;
+    bbox: number[];
+    landmarks: number[][];
+    confidence: number;
+    quality_score: number;
+    recognition_status: string;
+    identity_id: string | null;
+    identity_name: string | null;
+    recognition_confidence: number;
+  }>;
   fps?: number;
   latency_ms?: number;
   alert?: any;
   evidence_id?: string;
+  face_id?: string;
+  identity_id?: string | null;
+  identity_name?: string | null;
+  recognition_status?: string;
+  detection_confidence?: number;
+  recognition_confidence?: number;
+  bbox?: number[];
+  landmarks?: number[][];
+  crop_url?: string | null;
+  snapshot_url?: string | null;
+  quality_score?: number;
   camera_number?: string;
   camera_name?: string;
   location?: string;
@@ -74,8 +96,14 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
               const alertObj = data.alert || data;
               setLastAlert(alertObj);
               setLastMessage(data);
-              playDangerAlarmSound();
-            } else if (data.type === 'EVIDENCE_NEW') {
+              // Pass alert_id for sound deduplication — same alert won't trigger multiple sounds
+              const alertId = (data as any).alert_id || alertObj?.id;
+              playDangerAlarmSound(alertId);
+            } else if (data.type === 'FACE_WATCHLIST_MATCH') {
+              setLastMessage(data);
+              const alertId = (data as any).alert_id || `wl_${Date.now()}`;
+              playDangerAlarmSound(alertId);
+            } else if (data.type === 'EVIDENCE_NEW' || data.type === 'FACE_DETECTION_UPDATE') {
               setLastMessage(data);
             }
 
