@@ -16,7 +16,7 @@ from database.connection import SessionLocal
 from database.schema import Camera, CameraZone, ZoneRule, Event, Alert, Incident, Evidence, FaceDetection, FaceWatchlist
 
 from backend.config import (
-    DETECTION_CONFIDENCE_THRESHOLD, LOITERING_THRESHOLD_SEC, ALERT_COOLDOWN_SEC
+    DETECTION_CONFIDENCE_THRESHOLD, LOITERING_THRESHOLD_SEC, ALERT_COOLDOWN_SEC, EVIDENCE_CAPTURE_INTERVAL_SEC
 )
 
 logger = logging.getLogger(__name__)
@@ -90,10 +90,19 @@ class AISurveillanceAgent:
 
         latency_ms = round((time.time() - loop_start_time) * 1000, 1)
 
-        # 5. Confirmed tracks ONLY trigger security rules & alerts (Intrusions, Loitering, Incursions)
+        # 5. Confirmed tracks trigger intelligent throttled evidence capture + security rules
         confirmed_objs = [obj for obj in tracked_objects if obj.is_confirmed]
         if confirmed_objs:
-            # Process Category B: Security Rules & Alerts (Event-driven evidence capture)
+            # A. Automatic Detection Snapshots (Throttled per (camera_id, track_id, class_name) at EVIDENCE_CAPTURE_INTERVAL_SEC)
+            now_sec = time.time()
+            for obj in confirmed_objs:
+                track_key = (self.camera_id, obj.track_id, obj.class_name)
+                if now_sec - self.last_detection_snapshot_times.get(track_key, 0) >= EVIDENCE_CAPTURE_INTERVAL_SEC:
+                    self.last_detection_snapshot_times[track_key] = now_sec
+                    # Non-blocking async background evidence task
+                    asyncio.create_task(self._create_and_broadcast_detection_evidence(obj, frame))
+
+            # B. Process Category B: Security Rules & Alerts (Event-driven immediate evidence capture)
             await self._evaluate_surveillance_rules(confirmed_objs, frame)
 
         # 6. Face Detection & Recognition Pipeline
@@ -319,6 +328,11 @@ class AISurveillanceAgent:
             cam_name = cam.name if cam else "Border Surveillance Camera"
             cam_loc = cam.location or "Sector 4 Border Outpost" if cam else "Sector 4 Border Outpost"
 
+            is_vehicle = obj.class_name.lower() in ["car", "truck", "lorry", "bus", "motorcycle", "bicycle"]
+            track_prefix = "V" if is_vehicle else "P"
+            track_str = f"{track_prefix}-{obj.track_id}"
+            display_label = "TRUCK / LORRY" if obj.class_name.lower() in ["truck", "lorry"] else obj.class_name.upper()
+
             # ---- Offload JPEG encode + disk write to thread pool (non-blocking) ----
             loop = asyncio.get_event_loop()
             saved = await loop.run_in_executor(
@@ -330,7 +344,9 @@ class AISurveillanceAgent:
                     label=obj.class_name,
                     track_id=obj.track_id,
                     confidence=obj.confidence,
-                    event_type="DETECTION"
+                    event_type="NORMAL DETECTION",
+                    camera_name=cam_name,
+                    camera_location=cam_loc
                 )
             )
 
@@ -347,9 +363,10 @@ class AISurveillanceAgent:
                 "camera_name": cam_name,
                 "location": cam_loc,
                 "object_class": obj.class_name,
+                "display_label": display_label,
                 "confidence": obj.confidence,
-                "track_id": f"P-{obj.track_id}",
-                "event_type": "DETECTION",
+                "track_id": track_str,
+                "event_type": "NORMAL DETECTION",
                 "risk_score": 0.0,
                 "severity": "INFO",
                 "captured_at": datetime.utcnow().isoformat(),
@@ -373,7 +390,6 @@ class AISurveillanceAgent:
             logger.info(f"[EVIDENCE] Database record created: ID={ev_record.id}")
 
             image_api_url = f"/api/evidence/{ev_record.id}/image"
-            logger.info(f"[EVIDENCE] Snapshot URL: {image_api_url}")
 
             # Broadcast EVIDENCE_NEW via WebSocket — prepends to AI Detection History
             ev_dict = {
@@ -383,9 +399,10 @@ class AISurveillanceAgent:
                 "camera_name": cam_name,
                 "location": cam_loc,
                 "object_class": obj.class_name,
-                "track_id": f"P-{obj.track_id}",
+                "display_label": display_label,
+                "track_id": track_str,
                 "confidence": obj.confidence,
-                "event_type": "DETECTION",
+                "event_type": "NORMAL DETECTION",
                 "risk_score": 0.0,
                 "severity": "INFO",
                 "captured_at": ev_record.created_at.isoformat(),
@@ -400,9 +417,10 @@ class AISurveillanceAgent:
                 "camera_name": cam_name,
                 "location": cam_loc,
                 "object_class": obj.class_name,
-                "track_id": f"P-{obj.track_id}",
+                "display_label": display_label,
+                "track_id": track_str,
                 "confidence": obj.confidence,
-                "event_type": "DETECTION",
+                "event_type": "NORMAL DETECTION",
                 "risk_score": 0.0,
                 "severity": "INFO",
                 "timestamp": ev_record.created_at.isoformat(),
@@ -584,8 +602,13 @@ class AISurveillanceAgent:
         # Save Security Event Evidence Snapshot — offloaded to thread pool so event loop is never blocked
         file_path, file_url, file_size = None, None, 0
         ev_record = None
+        is_vehicle = obj.class_name.lower() in ["car", "truck", "lorry", "bus", "motorcycle", "bicycle"]
+        track_prefix = "V" if is_vehicle else "P"
+        track_str = f"{track_prefix}-{obj.track_id}"
+        display_label = "TRUCK / LORRY" if obj.class_name.lower() in ["truck", "lorry"] else obj.class_name.upper()
+
         if frame is not None:
-            logger.info(f"[EVIDENCE] Capturing security event snapshot: {event_type} | track P-{obj.track_id} | camera {cam.camera_id}")
+            logger.info(f"[EVIDENCE] Capturing security event snapshot: {event_type} | track {track_str} | camera {cam.camera_id}")
             loop = asyncio.get_event_loop()
             saved = await loop.run_in_executor(
                 self._io_executor,
@@ -596,7 +619,9 @@ class AISurveillanceAgent:
                     label=obj.class_name,
                     track_id=obj.track_id,
                     confidence=obj.confidence,
-                    event_type=event_type
+                    event_type=event_type,
+                    camera_name=cam.name,
+                    camera_location=cam.location or "Sector 4 Border Outpost"
                 )
             )
             if saved:
@@ -611,8 +636,9 @@ class AISurveillanceAgent:
                     "camera_name": cam.name,
                     "location": cam.location or "Sector 4 Border Outpost",
                     "object_class": obj.class_name,
+                    "display_label": display_label,
                     "confidence": obj.confidence,
-                    "track_id": f"P-{obj.track_id}",
+                    "track_id": track_str,
                     "event_type": event_type,
                     "risk_score": risk_score,
                     "severity": severity,
@@ -655,7 +681,8 @@ class AISurveillanceAgent:
                 "camera_name": cam.name,
                 "location": cam.location or "Sector 4 Border Outpost",
                 "object_class": obj.class_name,
-                "track_id": f"P-{obj.track_id}",
+                "display_label": display_label,
+                "track_id": track_str,
                 "confidence": obj.confidence,
                 "event_type": event_type,
                 "risk_score": risk_score,
@@ -672,7 +699,8 @@ class AISurveillanceAgent:
                 "camera_name": cam.name,
                 "location": cam.location or "Sector 4 Border Outpost",
                 "object_class": obj.class_name,
-                "track_id": f"P-{obj.track_id}",
+                "display_label": display_label,
+                "track_id": track_str,
                 "confidence": obj.confidence,
                 "event_type": event_type,
                 "risk_score": risk_score,

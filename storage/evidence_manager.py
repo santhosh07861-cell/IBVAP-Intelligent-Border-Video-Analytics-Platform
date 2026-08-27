@@ -24,7 +24,9 @@ class EvidenceManager:
     def save_annotated_snapshot(
         self, frame: np.ndarray, camera_id: str, bbox: list = None,
         label: str = "person", track_id: Any = None, confidence: float = 0.0,
-        event_type: str = "DETECTION"
+        event_type: str = "NORMAL DETECTION",
+        camera_name: str = "Border Surveillance Camera",
+        camera_location: str = "Sector 4 Border Outpost"
     ) -> Optional[tuple]:
         if frame is None or frame.size == 0:
             print("[EVIDENCE ERROR] Frame is empty or None")
@@ -33,7 +35,13 @@ class EvidenceManager:
         annotated = frame.copy()
         h, w = annotated.shape[:2]
 
-        print(f"[EVIDENCE] Frame received: {w}x{h}")
+        now_dt = datetime.utcnow()
+        clean_label = label.lower().strip()
+        display_label = "TRUCK / LORRY" if clean_label in ["truck", "lorry"] else clean_label.upper()
+
+        is_vehicle = clean_label in ["car", "truck", "lorry", "bus", "motorcycle", "bicycle"]
+        prefix = "V" if is_vehicle else "P"
+        track_str = f"{prefix}-{track_id}" if track_id else f"{prefix}-OBJ"
 
         if bbox and len(bbox) == 4:
             x1 = int(bbox[0] * w)
@@ -43,54 +51,55 @@ class EvidenceManager:
             x2 = min(w - 1, x1 + bw)
             y2 = min(h - 1, y1 + bh)
 
-            # Red/amber bounding box
-            box_color = (0, 0, 255) if event_type != "DETECTION" else (255, 165, 0)
+            # Color styling based on event / object type
+            if "INTRUSION" in event_type.upper() or "CROSSING" in event_type.upper() or "WATCHLIST" in event_type.upper():
+                box_color = (0, 0, 255) # Red for critical security events
+            elif "LOITERING" in event_type.upper() or "SUSPICIOUS" in event_type.upper():
+                box_color = (0, 165, 255) # Orange/amber for high risk
+            elif is_vehicle:
+                box_color = (255, 140, 0) # Deep sky blue / amber for vehicles
+            else:
+                box_color = (255, 191, 0) # Cyan/blue for person detection
+
             cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2)
 
-            # Label box
-            track_str = f"P-{track_id}" if track_id else "OBJ"
-            tag = f"{track_str} | {label.upper()} {int(confidence * 100)}%".strip()
-            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(annotated, (x1, max(0, y1 - 25)), (x1 + tw + 10, y1), box_color, -1)
-            cv2.putText(annotated, tag, (x1 + 5, max(15, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            # Label banner above box
+            tag = f"{track_str} | {display_label} {int(confidence * 100)}%".strip()
+            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            cv2.rectangle(annotated, (x1, max(0, y1 - 24)), (x1 + tw + 10, y1), box_color, -1)
+            cv2.putText(annotated, tag, (x1 + 5, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
-        # Top event banner
-        now_dt = datetime.utcnow()
-        banner_text = f"IBVAP EVIDENCE | {camera_id} | {event_type} | {now_dt.strftime('%d-%m-%Y %H:%M:%S UTC')}"
-        cv2.rectangle(annotated, (0, 0), (w, 35), (15, 23, 42), -1)
-        cv2.putText(annotated, banner_text, (15, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (59, 130, 246), 2)
+        # Top event & camera telemetry banner
+        banner_h = 38
+        cv2.rectangle(annotated, (0, 0), (w, banner_h), (15, 23, 42), -1)
+        cv2.line(annotated, (0, banner_h), (w, banner_h), (59, 130, 246), 1)
+
+        banner_text = (
+            f"IBVAP AI EVIDENCE | {camera_id} - {camera_name} | LOC: {camera_location} | "
+            f"{event_type.upper()} | {now_dt.strftime('%d/%m/%Y %H:%M:%S UTC')}"
+        )
+        cv2.putText(annotated, banner_text, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (226, 232, 240), 1, cv2.LINE_AA)
+
+        # Organized Date-Structured Directory: storage/evidence/detections/YYYY/MM/DD/camera_id/
+        year_str = now_dt.strftime("%Y")
+        month_str = now_dt.strftime("%m")
+        day_str = now_dt.strftime("%d")
+        clean_cam = camera_id.replace(" ", "_").replace("/", "_")
+        dir_path = os.path.join(self.storage_dir, "detections", year_str, month_str, day_str, clean_cam)
+        os.makedirs(dir_path, exist_ok=True)
 
         clean_event = event_type.replace(" ", "_").upper()
-        clean_track = f"P-{track_id}" if track_id else "OBJ"
-        clean_label = label.replace(" ", "_").upper()
+        clean_name = clean_label.replace(" ", "_").upper()
+        filename = f"{now_dt.strftime('%Y%m%d_%H%M%S')}_{clean_name}_{track_str}_{uuid.uuid4().hex[:4]}.jpg"
+        full_path = os.path.join(dir_path, filename)
 
-        if event_type == "DETECTION":
-            filename = f"{camera_id}_{clean_track}_{clean_label}_{now_dt.strftime('%Y-%m-%d_%H%M%S')}.jpg"
-        else:
-            filename = f"{camera_id}_{clean_track}_{clean_event}_{now_dt.strftime('%Y-%m-%d_%H%M%S')}.jpg"
-
-        full_path = os.path.join(self.storage_dir, "snapshots", filename)
-        print(f"[EVIDENCE] Saving: {full_path}")
-
-        success = cv2.imwrite(full_path, annotated)
-        if not success:
-            print(f"[EVIDENCE ERROR] cv2.imwrite failed to write file: {full_path}")
-            return None
-
-        # Verify file existence & non-zero file size
-        if not os.path.exists(full_path):
-            print(f"[EVIDENCE ERROR] Written file does not exist: {full_path}")
+        success = cv2.imwrite(full_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not success or not os.path.exists(full_path):
+            print(f"[EVIDENCE ERROR] Failed to write evidence snapshot: {full_path}")
             return None
 
         file_size = os.path.getsize(full_path)
-        if file_size == 0:
-            print(f"[EVIDENCE ERROR] Written file is 0 bytes: {full_path}")
-            return None
-
-        file_size_kb = round(file_size / 1024, 1)
-        print(f"[EVIDENCE] File written successfully ({file_size_kb} KB): {full_path}")
-
-        file_url = f"/static/evidence/{filename}"
+        file_url = f"/api/evidence/file/{year_str}/{month_str}/{day_str}/{clean_cam}/{filename}"
         return full_path, file_url, file_size
 
     def save_object_crop(self, frame: np.ndarray, bbox: list, camera_id: str, label: str = "object") -> Optional[str]:

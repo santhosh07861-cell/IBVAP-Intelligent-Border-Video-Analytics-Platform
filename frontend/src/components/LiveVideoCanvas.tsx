@@ -190,7 +190,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       }
 
       if (isStreaming) {
-        // A. Person & Object Bounding Boxes
+        // A. Person & Vehicle Object Bounding Boxes
         activeDets.forEach((det) => {
           const [nx, ny, nw, nh] = det.bbox;
           const bx = nx * w;
@@ -198,7 +198,19 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
           const bw = nw * w;
           const bh = nh * h;
 
-          ctx.strokeStyle = det.is_fallback ? '#f59e0b' : '#ef4444';
+          const cls = (det.class_name || '').toLowerCase();
+          const isVehicle = ['car', 'truck', 'lorry', 'bus', 'motorcycle', 'bicycle'].includes(cls);
+          const trackPrefix = isVehicle ? 'V' : 'P';
+          const displayLabel = (cls === 'truck' || cls === 'lorry') ? 'TRUCK / LORRY' : cls.toUpperCase();
+
+          // Class-specific tactical colors
+          const boxColor =
+            cls === 'person' ? '#38bdf8' :
+            (cls === 'bus' || cls === 'truck' || cls === 'lorry') ? '#f59e0b' :
+            cls === 'car' ? '#10b981' :
+            '#a855f7';
+
+          ctx.strokeStyle = boxColor;
           ctx.lineWidth = 2;
           ctx.strokeRect(bx, by, bw, bh);
 
@@ -210,15 +222,16 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
           ctx.beginPath(); ctx.moveTo(bx, by + bh - len); ctx.lineTo(bx, by + bh); ctx.lineTo(bx + len, by + bh); ctx.stroke();
           ctx.beginPath(); ctx.moveTo(bx + bw - len, by + bh); ctx.lineTo(bx + bw, by + bh); ctx.lineTo(bx + bw, by + bh - len); ctx.stroke();
 
-          const labelText = `#${det.track_id} ${det.class_name.toUpperCase()} (${(det.confidence * 100).toFixed(0)}%)`;
+          const labelText = `${trackPrefix}-${det.track_id} | ${displayLabel} | ${(det.confidence * 100).toFixed(0)}%`;
           ctx.font = 'bold 11px monospace';
           const textWidth = ctx.measureText(labelText).width;
 
-          ctx.fillStyle = det.is_fallback ? '#f59e0b' : '#ef4444';
+          ctx.fillStyle = boxColor;
           ctx.fillRect(bx, by - 20, textWidth + 8, 20);
 
-          ctx.fillStyle = '#ffffff';
-          ctx.fillText(labelText, bx + 4, by - 5);
+          ctx.fillStyle = '#0f172a';
+          ctx.font = 'bold 11px monospace';
+          ctx.fillText(labelText, bx + 4, by - 6);
         });
 
         // B. Real Face Bounding Boxes & Recognition Badges

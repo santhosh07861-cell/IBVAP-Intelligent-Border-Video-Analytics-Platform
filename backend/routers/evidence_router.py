@@ -34,6 +34,7 @@ def list_evidence(
     event_type: Optional[str] = None,
     severity: Optional[str] = None,
     search: Optional[str] = None,
+    sort: Optional[str] = Query("newest"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -42,33 +43,46 @@ def list_evidence(
     logger.info(
         f"[EVIDENCE] API list_evidence called — camera_id={camera_id} "
         f"object_class={object_class} event_type={event_type} "
-        f"severity={severity} search={search} limit={limit} offset={offset}"
+        f"severity={severity} search={search} sort={sort} limit={limit} offset={offset}"
     )
 
     query = db.query(Evidence)
-    if camera_id:
+    if camera_id and camera_id != "all":
         query = query.filter(Evidence.camera_id == camera_id)
 
-    items = query.order_by(desc(Evidence.created_at)).all()
+    order_clause = desc(Evidence.created_at) if sort == "newest" else Evidence.created_at
+    items = query.order_by(order_clause).all()
     logger.info(f"[EVIDENCE] Raw DB query returned {len(items)} records")
 
     results = []
     for item in items:
         meta = item.metadata_json or {}
-        obj_cls = meta.get("object_class", "person")
-        ev_type = meta.get("event_type", "DETECTION")
+        obj_cls = meta.get("object_class", "person").lower()
+        display_label = meta.get("display_label") or ("TRUCK / LORRY" if obj_cls in ["truck", "lorry"] else obj_cls.upper())
+        ev_type = meta.get("event_type", "NORMAL DETECTION")
         sev = meta.get("severity", "INFO")
         cam_num = meta.get("camera_number", item.camera_id)
         cam_name = meta.get("camera_name", "Border Outpost Camera")
-        location = meta.get("location", "Sector 4 / Gate 2")
+        location = meta.get("location", "Sector 4 Border Outpost")
 
         # Apply filters
-        if object_class and object_class != "all" and obj_cls.lower() != object_class.lower():
-            continue
-        if event_type and event_type != "all" and ev_type.lower() != event_type.lower():
-            continue
+        if object_class and object_class != "all":
+            req_cls = object_class.lower()
+            if req_cls in ["truck", "lorry"] and obj_cls not in ["truck", "lorry"]:
+                continue
+            elif req_cls not in ["truck", "lorry"] and obj_cls != req_cls:
+                continue
+
+        if event_type and event_type != "all":
+            if event_type.upper() in ["NORMAL DETECTION", "DETECTION"]:
+                if ev_type.upper() not in ["NORMAL DETECTION", "DETECTION"]:
+                    continue
+            elif ev_type.lower() != event_type.lower():
+                continue
+
         if severity and severity != "all" and sev.upper() != severity.upper():
             continue
+
         if search:
             s = search.lower()
             match = (
@@ -76,6 +90,7 @@ def list_evidence(
                 or s in str(cam_name).lower()
                 or s in str(location).lower()
                 or s in str(obj_cls).lower()
+                or s in str(display_label).lower()
                 or s in str(ev_type).lower()
                 or s in str(meta.get("track_id", "")).lower()
             )
@@ -83,8 +98,6 @@ def list_evidence(
                 continue
 
         # Determine best image URL:
-        # Prefer the /api/evidence/{id}/image endpoint (serves file directly).
-        # Fall back to /static/evidence/<filename> if file_path is absent.
         if item.file_path and os.path.exists(item.file_path):
             img_url = f"/api/evidence/{item.id}/image"
         elif item.file_url:
@@ -101,6 +114,7 @@ def list_evidence(
                 "camera_name": cam_name,
                 "location": location,
                 "object_class": obj_cls,
+                "display_label": display_label,
                 "confidence": meta.get("confidence", 0.90),
                 "track_id": meta.get("track_id", "P-101"),
                 "event_type": ev_type,
@@ -122,17 +136,23 @@ def list_evidence(
     offset_val = int(offset)
     paginated = results[offset_val: offset_val + limit_val]
 
-    logger.info(
-        f"[EVIDENCE] API returning {len(paginated)} items "
-        f"(total={total} after filters, limit={limit_val}, offset={offset_val})"
-    )
-
     return {
         "total": total,
         "limit": limit_val,
         "offset": offset_val,
         "items": paginated,
     }
+
+
+@router.get("/file/{year}/{month}/{day}/{camera_id}/{filename}")
+def get_evidence_file_direct(
+    year: str, month: str, day: str, camera_id: str, filename: str
+):
+    """Serves date-structured evidence snapshots directly."""
+    full_path = os.path.join("storage", "evidence", "detections", year, month, day, camera_id, filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Evidence snapshot file not found")
+    return FileResponse(full_path, media_type="image/jpeg")
 
 
 # ---------------------------------------------------------------------------

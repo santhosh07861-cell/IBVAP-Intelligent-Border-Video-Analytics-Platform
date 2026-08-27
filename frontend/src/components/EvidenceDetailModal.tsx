@@ -9,7 +9,8 @@ interface EvidenceDetailModalProps {
 export const EvidenceDetailModal: React.FC<EvidenceDetailModalProps> = ({ item, onClose }) => {
   if (!item) return null;
 
-  const objectClass = (item.object_class || 'person').toUpperCase();
+  const cleanCls = (item.object_class || 'person').toLowerCase().trim();
+  const objectClass = item.display_label || ((cleanCls === 'truck' || cleanCls === 'lorry') ? 'TRUCK / LORRY' : cleanCls.toUpperCase());
   const confidencePct = `${((item.confidence || 0.90) * 100).toFixed(0)}%`;
   const cameraNumber = item.camera_number || item.camera_id || 'CAM-01';
   const cameraName = item.camera_name || 'Border Surveillance Outpost Camera';

@@ -10,6 +10,17 @@ import { EvidenceDetailModal } from '../components/EvidenceDetailModal';
 
 const API_BASE = 'http://localhost:8000';
 
+function getObjectDisplayLabel(objCls?: string): string {
+  const c = (objCls || '').toLowerCase().trim();
+  if (c === 'truck' || c === 'lorry') return 'TRUCK / LORRY';
+  if (c === 'person') return 'PERSON';
+  if (c === 'car') return 'CAR';
+  if (c === 'bus') return 'BUS';
+  if (c === 'motorcycle') return 'MOTORCYCLE';
+  if (c === 'bicycle') return 'BICYCLE';
+  return (objCls || 'OBJECT').toUpperCase();
+}
+
 // ---- Severity badge helper ----
 function SeverityBadge({ severity }: { severity: string }) {
   const cls =
@@ -390,8 +401,8 @@ export const EvidenceGallery: React.FC = () => {
                     <Maximize2 className="w-8 h-8 text-white drop-shadow-lg" />
                   </div>
                   {/* Object badge */}
-                  <div className="absolute top-2 left-2 bg-blue-600/90 text-white font-bold text-[10px] px-2 py-0.5 rounded shadow uppercase">
-                    {(item.object_class || 'obj').toUpperCase()} {item.confidence ? `${(item.confidence * 100).toFixed(0)}%` : ''}
+                  <div className="absolute top-2 left-2 bg-blue-600/90 text-white font-bold text-[10px] px-2 py-0.5 rounded shadow uppercase font-mono">
+                    {getObjectDisplayLabel(item.display_label || item.object_class)} {item.confidence ? `${(item.confidence * 100).toFixed(0)}%` : ''}
                   </div>
                   {/* Track badge */}
                   <div className="absolute top-2 right-2 bg-slate-950/90 text-amber-400 font-bold text-[10px] px-2 py-0.5 rounded border border-amber-500/40 font-mono">
@@ -400,22 +411,37 @@ export const EvidenceGallery: React.FC = () => {
                 </div>
 
                 {/* Card Body */}
-                <div className="p-3 space-y-2 flex-1 flex flex-col justify-between text-xs">
+                <div className="p-3.5 space-y-2.5 flex-1 flex flex-col justify-between text-xs">
                   <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-amber-400 font-bold truncate text-[11px] max-w-[60%]">
-                        {item.event_type || 'DETECTION'}
+                    <div className="flex items-center justify-between mb-1 font-mono">
+                      <span className="font-bold text-sm text-slate-100 tracking-wide">
+                        {getObjectDisplayLabel(item.display_label || item.object_class)}
                       </span>
-                      <SeverityBadge severity={item.severity || 'INFO'} />
+                      <span className="font-bold text-sm text-blue-400 font-mono">
+                        {item.confidence ? `${(item.confidence * 100).toFixed(0)}%` : ''}
+                      </span>
                     </div>
-                    <div className="text-[11px] text-slate-400 space-y-0.5 font-mono">
-                      <div>Cam: <strong className="text-blue-400">{item.camera_number || item.camera_id}</strong></div>
-                      <div className="truncate">Loc: <strong className="text-slate-300">{item.location || '—'}</strong></div>
+
+                    <div className="text-amber-400 font-mono text-[11px] mb-2 font-semibold">
+                      Track ID: <span className="text-amber-300">{item.track_id || '—'}</span>
+                    </div>
+
+                    <div className="text-[11px] text-slate-400 space-y-1 font-mono bg-[#0a0d14] p-2.5 rounded-lg border border-[#252d42]">
+                      <div>Camera: <strong className="text-blue-400">{item.camera_number || item.camera_id}</strong></div>
+                      <div className="truncate">Location: <strong className="text-slate-300">{item.location || '—'}</strong></div>
                       {dt && (
-                        <div className="text-slate-500">{dt.toLocaleDateString()} {dt.toLocaleTimeString()}</div>
+                        <div className="text-slate-400 flex flex-wrap gap-x-2">
+                          <span>Date: <strong className="text-slate-200">{dt.toLocaleDateString()}</strong></span>
+                          <span>Time: <strong className="text-slate-200">{dt.toLocaleTimeString()}</strong></span>
+                        </div>
                       )}
+                      <div className="flex items-center justify-between pt-1 border-t border-[#252d42] mt-1">
+                        <span className="text-slate-400">Event: <strong className="text-amber-400 text-[10px] uppercase">{item.event_type || 'NORMAL DETECTION'}</strong></span>
+                        <SeverityBadge severity={item.severity || 'INFO'} />
+                      </div>
                     </div>
                   </div>
+
                   <div className="flex gap-2 pt-1">
                     <button
                       onClick={() => setLightboxIdx(idx)}
@@ -476,7 +502,7 @@ export const EvidenceGallery: React.FC = () => {
                           </div>
                         </div>
                       </td>
-                      <td className="p-3 font-bold text-blue-400 uppercase">{item.object_class || '—'}</td>
+                      <td className="p-3 font-bold text-blue-400 uppercase">{getObjectDisplayLabel(item.display_label || item.object_class)}</td>
                       <td className="p-3 text-emerald-400 font-bold">{item.confidence ? `${(item.confidence * 100).toFixed(0)}%` : '—'}</td>
                       <td className="p-3 text-blue-400 font-bold">{item.camera_number || item.camera_id}</td>
                       <td className="p-3 text-slate-400 truncate max-w-[140px]">{item.location || '—'}</td>

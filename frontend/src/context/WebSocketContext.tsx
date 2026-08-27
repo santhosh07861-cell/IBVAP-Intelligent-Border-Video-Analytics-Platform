@@ -44,6 +44,7 @@ export interface DetectionMessage {
   camera_name?: string;
   location?: string;
   object_class?: string;
+  display_label?: string;
   track_id?: string;
   confidence?: number;
   event_type?: string;
