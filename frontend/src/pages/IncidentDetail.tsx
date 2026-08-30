@@ -1,18 +1,29 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { AlertOctagon, CheckCircle2, ShieldAlert, MessageSquare, Image, FileText, ArrowLeft } from 'lucide-react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
+import { AlertOctagon, CheckCircle2, ShieldAlert, MessageSquare, Image, FileText, ArrowLeft, Trash2, X, RefreshCw } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { formatISTDateTime, formatISTTime } from '../utils/timeFormat';
 
 export const IncidentDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [incident, setIncident] = useState<any>(null);
   const [newNote, setNewNote] = useState('');
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const { token, user } = useAuth();
+
+  const getHeaders = () => {
+    const headers: Record<string, string> = {};
+    const authToken = token || localStorage.getItem('ibvap_token');
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    return headers;
+  };
 
   const fetchDetail = async () => {
     try {
       const res = await fetch(`/api/incidents/${id}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: getHeaders()
       });
       if (res.ok) {
         const data = await res.json();
@@ -33,7 +44,7 @@ export const IncidentDetail: React.FC = () => {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          ...getHeaders()
         },
         body: JSON.stringify({ status })
       });
@@ -53,7 +64,7 @@ export const IncidentDetail: React.FC = () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          ...getHeaders()
         },
         body: JSON.stringify({ note_text: newNote })
       });
@@ -66,6 +77,28 @@ export const IncidentDetail: React.FC = () => {
     }
   };
 
+  const handleDeleteIncident = async () => {
+    setIsDeleting(true);
+    try {
+      const res = await fetch(`/api/incidents/${id}`, {
+        method: 'DELETE',
+        headers: getHeaders()
+      });
+      if (res.ok) {
+        navigate('/incidents');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`Failed to delete incident: ${err.detail || 'Server error'}`);
+      }
+    } catch (e: any) {
+      console.error('Delete incident error:', e);
+      alert(`Error deleting incident: ${e.message}`);
+    } finally {
+      setIsDeleting(false);
+      setShowDeleteModal(false);
+    }
+  };
+
   if (!incident) {
     return <div className="p-6 text-slate-400 font-mono text-xs">Loading incident details...</div>;
   }
@@ -73,7 +106,7 @@ export const IncidentDetail: React.FC = () => {
   return (
     <div className="p-6 space-y-6">
       {/* Top Header */}
-      <div className="flex items-center justify-between bg-[#111622] p-4 rounded-xl border border-[#252d42]">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#111622] p-4 rounded-xl border border-[#252d42]">
         <div className="flex items-center gap-3">
           <Link to="/incidents" className="p-2 bg-[#1a2030] hover:bg-slate-800 rounded-lg text-slate-300 transition-colors border border-[#252d42]">
             <ArrowLeft className="w-4 h-4" />
@@ -92,7 +125,7 @@ export const IncidentDetail: React.FC = () => {
         </div>
 
         {/* Workflow Action Buttons */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
             onClick={() => handleUpdateStatus('INVESTIGATING')}
             className="px-3 py-1.5 bg-blue-600/20 border border-blue-500/40 text-blue-300 hover:bg-blue-600/30 text-xs font-semibold rounded transition-colors"
@@ -111,6 +144,14 @@ export const IncidentDetail: React.FC = () => {
           >
             MARK FALSE POSITIVE
           </button>
+          <button
+            onClick={() => setShowDeleteModal(true)}
+            className="px-3 py-1.5 bg-red-950/40 border border-red-500/40 text-red-400 hover:bg-red-900/60 hover:text-red-300 text-xs font-semibold rounded transition-colors flex items-center gap-1.5"
+            title="Delete Incident"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            DELETE
+          </button>
         </div>
       </div>
 
@@ -123,7 +164,7 @@ export const IncidentDetail: React.FC = () => {
             <p className="text-slate-300">{incident.description}</p>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-2 text-[11px] text-slate-400 border-t border-[#252d42]">
               <div>Camera: <span className="text-blue-400 font-bold">{incident.camera_id}</span></div>
-              <div>Start Time: <span className="text-slate-200">{new Date(incident.start_time).toLocaleString()}</span></div>
+              <div>Start Time: <span className="text-slate-200 font-mono">{formatISTDateTime(incident.start_time || incident.created_at)}</span></div>
               <div>Status: <span className="text-emerald-400 font-bold">{incident.status}</span></div>
             </div>
           </div>
@@ -144,19 +185,18 @@ export const IncidentDetail: React.FC = () => {
                       alt="Captured Evidence"
                       className="w-full aspect-video object-cover rounded border border-[#252d42]"
                       onError={(e) => {
-                        // Fallback snapshot preview if file URL is local mock
                         e.currentTarget.src = 'https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&auto=format&fit=crop&q=80';
                       }}
                     />
                     <div className="text-[10px] text-slate-400 flex justify-between">
-                      <span>TYPE: {ev.evidence_type.toUpperCase()}</span>
-                      <span>{new Date(ev.created_at).toLocaleTimeString()}</span>
+                      <span>TYPE: {(ev.evidence_type || 'SNAPSHOT').toUpperCase()}</span>
+                      <span className="font-mono">{formatISTTime(ev.created_at)}</span>
                     </div>
                   </div>
                 ))
               ) : (
                 <div className="col-span-2 bg-slate-950 p-4 rounded-lg border border-[#252d42] text-center text-slate-500">
-                  AUTOMATIC SNAPSHOT CAPTURED: STORAGE/EVIDENCE/SNAPSHOTS/CAM-01_INTRUSION.JPG
+                  NO ATTACHED EVIDENCE SNAPSHOTS FOR THIS INCIDENT
                 </div>
               )}
             </div>
@@ -177,7 +217,7 @@ export const IncidentDetail: React.FC = () => {
                   <div key={n.id} className="bg-[#0a0d14] p-3 rounded-lg border border-[#252d42] text-xs font-mono space-y-1">
                     <div className="flex justify-between font-bold text-blue-400 text-[11px]">
                       <span>{n.author_name}</span>
-                      <span className="text-slate-500 font-normal text-[10px]">{new Date(n.created_at).toLocaleTimeString()}</span>
+                      <span className="text-slate-500 font-normal text-[10px] font-mono">{formatISTTime(n.created_at)}</span>
                     </div>
                     <p className="text-slate-300">{n.note_text}</p>
                   </div>
@@ -204,6 +244,67 @@ export const IncidentDetail: React.FC = () => {
           </form>
         </div>
       </div>
+
+      {/* Delete Incident Modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-[150] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
+          <div className="bg-[#111622] border border-red-500/40 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-0 animate-in fade-in zoom-in duration-150">
+            <div className="bg-red-950/40 px-6 py-4 border-b border-red-500/30 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-500/20 rounded-lg text-red-400 border border-red-500/30">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-100 text-sm tracking-wide uppercase">DELETE INCIDENT?</h3>
+                  <p className="text-[11px] text-red-400/80 font-mono">{incident.incident_number}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowDeleteModal(false)}
+                disabled={isDeleting}
+                className="p-1.5 rounded-lg bg-[#0a0d14] text-slate-400 hover:text-white border border-[#252d42]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 text-xs">
+              <p className="text-slate-300">
+                Are you sure you want to permanently delete incident <strong className="text-blue-400">{incident.incident_number}</strong>?
+              </p>
+              <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg text-red-300 text-[11px]">
+                ⚠ This action is permanent and creates an immutable audit trail.
+              </div>
+            </div>
+            <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowDeleteModal(false)}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteIncident}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition-all disabled:opacity-50"
+              >
+                {isDeleting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete Incident
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { LayoutGrid, Grid2X2, Grid3X3, Camera, Filter } from 'lucide-react';
 import { useWebSocket } from '../context/WebSocketContext';
 import { useCameras } from '../context/CameraContext';
@@ -8,10 +8,9 @@ export const Surveillance: React.FC = () => {
   const [gridSize, setGridSize] = useState<number>(4);
   const [roleFilter, setRoleFilter] = useState<'all' | 'secondary' | 'primary'>('all');
 
-  const { cameras, secondaryCameras, primaryCamera, subscribeCamera, unsubscribeCamera } = useCameras();
+  const { cameras, secondaryCameras, primaryCamera } = useCameras();
   const { getCameraTelemetry } = useWebSocket();
 
-  // Filter cameras based on user selection
   const filteredCameras = roleFilter === 'secondary'
     ? secondaryCameras
     : roleFilter === 'primary'
@@ -20,37 +19,12 @@ export const Surveillance: React.FC = () => {
 
   const displayCams = filteredCameras.slice(0, gridSize);
 
-  // Subscribe to secondary cameras on entering Live Surveillance and unsubscribe on exit
-  useEffect(() => {
-    const subscriptions: Array<{ cid: string; subId: string }> = [];
-
-    const activateSubscriptions = async () => {
-      for (const cam of displayCams) {
-        if (cam.camera_id) {
-          const subId = await subscribeCamera(cam.camera_id, "surveillance_grid");
-          if (subId) {
-            subscriptions.push({ cid: cam.camera_id, subId });
-          }
-        }
-      }
-    };
-
-    activateSubscriptions();
-
-    return () => {
-      // Unsubscribe all secondary cameras when leaving Live Surveillance page
-      subscriptions.forEach(({ cid, subId }) => {
-        unsubscribeCamera(cid, subId);
-      });
-    };
-  }, [displayCams.map(c => c.camera_id).join(','), subscribeCamera, unsubscribeCamera]);
-
   return (
     <div className="p-6 space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#111622] p-4 rounded-xl border border-[#252d42]">
         <div>
-          <h2 className="text-lg font-bold tracking-wider text-slate-100 uppercase font-mono">LIVE BORDER SURVEILLANCE GRID</h2>
-          <p className="text-xs text-slate-400 font-mono">REAL-TIME MULTI-CAMERA STREAM INGESTION & TACTICAL OVERLAY</p>
+          <h2 className="text-lg font-bold tracking-wider text-slate-100 uppercase font-mono">LIVE MULTI-CAMERA SURVEILLANCE GRID</h2>
+          <p className="text-xs text-slate-400 font-mono">REAL-TIME INDEPENDENT CAMERA INGESTION & AI DETECTIONS</p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -132,8 +106,9 @@ export const Surveillance: React.FC = () => {
             const telem = getCameraTelemetry(cam.camera_id);
             const isCamOnline = cam.status === 'ONLINE' || (telem?.fps || 0) > 0;
             const camFps = isCamOnline ? (telem?.fps || cam.fps || 25.0) : 0.0;
-            const camLatency = telem?.latency_ms || 0.0;
+            const camLatency = isCamOnline ? (telem?.latency_ms || 0.0) : 0.0;
             const camDets = isCamOnline ? (telem?.detections || []) : [];
+            const camFaces = isCamOnline ? (telem?.faces || []) : [];
             const camInferenceMode = isCamOnline ? (telem?.inference_mode || 'REAL AI | INFERENCE RUNNING') : 'OFFLINE';
 
             return (
@@ -142,6 +117,7 @@ export const Surveillance: React.FC = () => {
                   cameraId={cam.camera_id}
                   cameraName={cam.name}
                   detections={camDets}
+                  faces={camFaces}
                   fps={camFps}
                   latencyMs={camLatency}
                   inferenceMode={camInferenceMode}

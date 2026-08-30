@@ -2,13 +2,12 @@ import React, { useEffect, useState, useCallback } from 'react';
 import {
   Camera, ShieldAlert, Search, LayoutGrid, TableProperties,
   Eye, ArrowUpDown, RefreshCw, Cpu, AlertTriangle, X,
-  ChevronLeft, ChevronRight, Download, Maximize2, Info
+  ChevronLeft, ChevronRight, Download, Maximize2, Info, Trash2, CheckSquare, Square
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../context/WebSocketContext';
 import { EvidenceDetailModal } from '../components/EvidenceDetailModal';
-
-const API_BASE = 'http://localhost:8000';
+import { formatISTDate, formatISTTime, formatISTDateTime } from '../utils/timeFormat';
 
 function getObjectDisplayLabel(objCls?: string): string {
   const c = (objCls || '').toLowerCase().trim();
@@ -18,6 +17,12 @@ function getObjectDisplayLabel(objCls?: string): string {
   if (c === 'bus') return 'BUS';
   if (c === 'motorcycle') return 'MOTORCYCLE';
   if (c === 'bicycle') return 'BICYCLE';
+  if (c === 'cell phone') return 'PHONE';
+  if (c === 'laptop') return 'LAPTOP';
+  if (c === 'backpack' || c === 'handbag' || c === 'suitcase') return c.toUpperCase();
+  if (c === 'chair' || c === 'couch' || c === 'bed') return c.toUpperCase();
+  if (c === 'drone') return 'DRONE';
+  if (c === 'unknown') return 'UNKNOWN OBJECT';
   return (objCls || 'OBJECT').toUpperCase();
 }
 
@@ -91,6 +96,190 @@ function ImageLightbox({
   );
 }
 
+// ---- Delete Confirmation Modal ----
+function DeleteConfirmationModal({
+  item,
+  isDeleting,
+  onConfirm,
+  onCancel,
+}: {
+  item: any;
+  isDeleting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  if (!item) return null;
+  const dt = item.captured_at ? new Date(item.captured_at) : new Date();
+
+  return (
+    <div className="fixed inset-0 z-[110] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
+      <div className="bg-[#111622] border border-red-500/40 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-0 animate-in fade-in zoom-in duration-150">
+        {/* Header */}
+        <div className="bg-red-950/40 px-6 py-4 border-b border-red-500/30 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-red-500/20 rounded-lg text-red-400 border border-red-500/30">
+              <Trash2 className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-slate-100 text-sm tracking-wide uppercase">DELETE DETECTION?</h3>
+              <p className="text-[11px] text-red-400/80 font-mono">PERMANENT REMOVAL</p>
+            </div>
+          </div>
+          <button
+            onClick={onCancel}
+            disabled={isDeleting}
+            className="p-1.5 rounded-lg bg-[#0a0d14] text-slate-400 hover:text-white border border-[#252d42]"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Content Details */}
+        <div className="p-6 space-y-4 text-xs">
+          <p className="text-slate-300 font-sans text-xs leading-relaxed">
+            Are you sure you want to permanently delete this detection record and its associated snapshot image?
+          </p>
+
+          <div className="bg-[#0a0d14] p-3.5 rounded-xl border border-[#252d42] space-y-2 text-[11px]">
+            <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+              <span className="text-slate-400">Object:</span>
+              <strong className="text-blue-400 uppercase font-bold">
+                {getObjectDisplayLabel(item.display_label || item.object_class)}
+              </strong>
+            </div>
+            <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+              <span className="text-slate-400">Track ID:</span>
+              <strong className="text-amber-400">{item.track_id || '—'}</strong>
+            </div>
+            <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+              <span className="text-slate-400">Camera:</span>
+              <strong className="text-slate-200">{item.camera_number || item.camera_id}</strong>
+            </div>
+            <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+              <span className="text-slate-400">Location:</span>
+              <span className="text-slate-300 truncate max-w-[200px]">{item.location || '—'}</span>
+            </div>
+            <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+              <span className="text-slate-400">Date:</span>
+              <span className="text-slate-200 font-mono">{formatISTDate(item.captured_at || item.created_at || item.timestamp)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Time:</span>
+              <span className="text-slate-200 font-mono">{formatISTTime(item.captured_at || item.created_at || item.timestamp)}</span>
+            </div>
+          </div>
+
+          <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg text-red-300 text-[11px]">
+            ⚠ This action is destructive and cannot be undone. An audit log entry will be recorded.
+          </div>
+        </div>
+
+        {/* Footer Actions */}
+        <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+          <button
+            onClick={onCancel}
+            disabled={isDeleting}
+            className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={isDeleting}
+            className="px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition-all disabled:opacity-50"
+          >
+            {isDeleting ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                Deleting...
+              </>
+            ) : (
+              <>
+                <Trash2 className="w-3.5 h-3.5" />
+                Delete
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- Bulk Delete Confirmation Modal ----
+function BulkDeleteModal({
+  count,
+  isDeleting,
+  onConfirm,
+  onCancel,
+}: {
+  count: number;
+  isDeleting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[110] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
+      <div className="bg-[#111622] border border-red-500/40 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-0">
+        <div className="bg-red-950/40 px-6 py-4 border-b border-red-500/30 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-red-500/20 rounded-lg text-red-400 border border-red-500/30">
+              <Trash2 className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-slate-100 text-sm tracking-wide uppercase">DELETE {count} DETECTIONS?</h3>
+              <p className="text-[11px] text-red-400/80 font-mono">BULK PERMANENT REMOVAL</p>
+            </div>
+          </div>
+          <button
+            onClick={onCancel}
+            disabled={isDeleting}
+            className="p-1.5 rounded-lg bg-[#0a0d14] text-slate-400 hover:text-white border border-[#252d42]"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4 text-xs">
+          <p className="text-slate-300 leading-relaxed font-sans">
+            Are you sure you want to permanently delete <strong className="text-red-400 font-mono">{count}</strong> selected detection records and their associated snapshot files?
+          </p>
+          <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg text-red-300 text-[11px]">
+            ⚠ This action cannot be undone. All selected evidence snapshots will be permanently erased.
+          </div>
+        </div>
+
+        <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+          <button
+            onClick={onCancel}
+            disabled={isDeleting}
+            className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={isDeleting}
+            className="px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition-all disabled:opacity-50"
+          >
+            {isDeleting ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                Deleting {count}...
+              </>
+            ) : (
+              <>
+                <Trash2 className="w-3.5 h-3.5" />
+                Delete All ({count})
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---- Main Page ----
 export const EvidenceGallery: React.FC = () => {
   const [items, setItems] = useState<any[]>([]);
@@ -100,6 +289,13 @@ export const EvidenceGallery: React.FC = () => {
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
   const [selectedItem, setSelectedItem] = useState<any | null>(null);
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+
+  // Deletion States
+  const [itemToDelete, setItemToDelete] = useState<any | null>(null);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState<boolean>(false);
+  const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Filters & Search
   const [search, setSearch] = useState('');
@@ -112,11 +308,18 @@ export const EvidenceGallery: React.FC = () => {
   const { token } = useAuth();
   const { lastMessage } = useWebSocket();
 
+  const showToast = (type: 'success' | 'error', text: string) => {
+    setToastMessage({ type, text });
+    setTimeout(() => {
+      setToastMessage(null);
+    }, 4000);
+  };
+
   const fetchEvidence = useCallback(async () => {
     setLoading(true);
     setApiError(null);
     try {
-      const authToken = token || localStorage.getItem('ibvap_token');
+      const authToken = token || localStorage.getItem('ibvap_token') || localStorage.getItem('token');
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
@@ -139,7 +342,6 @@ export const EvidenceGallery: React.FC = () => {
       const fetched = data.items || [];
       setItems(fetched);
       setTotalCount(data.total ?? fetched.length);
-      console.log(`[EVIDENCE] API returned ${fetched.length} records (total=${data.total})`);
     } catch (err: any) {
       console.error('[EVIDENCE] Fetch failed:', err);
       setApiError(err?.message || 'Failed to load evidence from backend');
@@ -164,9 +366,10 @@ export const EvidenceGallery: React.FC = () => {
         camera_name: ws.camera_name,
         location: ws.location,
         object_class: ws.object_class,
+        display_label: ws.display_label,
         confidence: ws.confidence,
         track_id: ws.track_id,
-        event_type: ws.event_type || 'DETECTION',
+        event_type: ws.event_type || 'NORMAL DETECTION',
         risk_score: ws.risk_score ?? 0.0,
         severity: ws.severity || 'INFO',
         captured_at: ws.timestamp || new Date().toISOString(),
@@ -176,10 +379,110 @@ export const EvidenceGallery: React.FC = () => {
       if (newEv.id) {
         setItems((prev) => [newEv, ...prev.filter((x) => x.id !== newEv.id)]);
         setTotalCount((c) => c + 1);
-        console.log('[EVIDENCE] Real-time EVIDENCE_NEW prepended:', newEv.id);
       }
     }
   }, [lastMessage]);
+
+  // Handle single deletion
+  const handleDeleteConfirm = async () => {
+    if (!itemToDelete) return;
+    setIsDeleting(true);
+    const targetId = itemToDelete.id;
+
+    try {
+      const authToken = token || localStorage.getItem('ibvap_token') || localStorage.getItem('token');
+      const headers: Record<string, string> = {};
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const res = await fetch(`/api/evidence/${targetId}`, {
+        method: 'DELETE',
+        headers,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText);
+        throw new Error(`Deletion failed (${res.status}): ${errText}`);
+      }
+
+      // Immediate state update
+      setItems((prev) => prev.filter((it) => it.id !== targetId));
+      setTotalCount((c) => Math.max(0, c - 1));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(targetId);
+        return next;
+      });
+
+      showToast('success', `✓ Detection #${targetId.substring(0, 8)} deleted successfully`);
+      setItemToDelete(null);
+    } catch (err: any) {
+      console.error('[EVIDENCE] Delete error:', err);
+      showToast('error', `⚠ DELETE FAILED: ${err.message || 'Unable to delete detection'}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Handle bulk deletion
+  const handleBulkDeleteConfirm = async () => {
+    if (selectedIds.size === 0) return;
+    setIsDeleting(true);
+    const idsArray = Array.from(selectedIds);
+
+    try {
+      const authToken = token || localStorage.getItem('ibvap_token') || localStorage.getItem('token');
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const res = await fetch('/api/evidence/bulk-delete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ evidence_ids: idsArray }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText);
+        throw new Error(`Bulk deletion failed (${res.status}): ${errText}`);
+      }
+
+      const data = await res.json();
+      const deletedSet = new Set(data.deleted_ids || idsArray);
+
+      setItems((prev) => prev.filter((it) => !deletedSet.has(it.id)));
+      setTotalCount((c) => Math.max(0, c - deletedSet.size));
+      setSelectedIds(new Set());
+      setShowBulkDeleteModal(false);
+
+      showToast('success', `✓ ${deletedSet.size} detection records deleted successfully`);
+    } catch (err: any) {
+      console.error('[EVIDENCE] Bulk delete error:', err);
+      showToast('error', `⚠ BULK DELETE FAILED: ${err.message || 'Unable to delete records'}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const toggleSelectId = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === items.length && items.length > 0) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(items.map((it) => it.id)));
+    }
+  };
 
   const sortedItems = [...items].sort((a, b) => {
     const tA = new Date(a.captured_at || 0).getTime();
@@ -192,19 +495,31 @@ export const EvidenceGallery: React.FC = () => {
     new Set(items.map((it) => it.camera_number || it.camera_id).filter(Boolean))
   );
 
-  // Image URL resolver — prefer /api/evidence/{id}/image, fall back to file_url
+  // Image URL resolver
   const resolveImageUrl = (item: any): string | null => {
     if (item.id && item.file_url) {
-      // If the file_url already starts with /api/evidence, use as-is
       if (item.file_url.startsWith('/api/evidence')) return item.file_url;
-      // Otherwise use the /api/evidence/{id}/image endpoint
       return `/api/evidence/${item.id}/image`;
     }
     return item.file_url || item.evidence_url || null;
   };
 
   return (
-    <div className="p-6 space-y-6 font-mono">
+    <div className="p-6 space-y-6 font-mono relative">
+      {/* ── Toast Notification Banner ── */}
+      {toastMessage && (
+        <div className={`fixed top-6 right-6 z-[120] px-4 py-3 rounded-xl border shadow-2xl flex items-center gap-3 transition-all animate-in slide-in-from-top-4 ${
+          toastMessage.type === 'success'
+            ? 'bg-[#0f241a] border-emerald-500/50 text-emerald-300'
+            : 'bg-[#2a0f14] border-red-500/50 text-red-300'
+        }`}>
+          <span className="font-bold text-xs">{toastMessage.text}</span>
+          <button onClick={() => setToastMessage(null)} className="text-slate-400 hover:text-white">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* ── Top Header ── */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#111622] p-4 rounded-xl border border-[#252d42]">
         <div>
@@ -218,6 +533,15 @@ export const EvidenceGallery: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {selectedIds.size > 0 && (
+            <button
+              onClick={() => setShowBulkDeleteModal(true)}
+              className="px-3.5 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/40 border border-red-500/30 transition-all"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete Selected ({selectedIds.size})
+            </button>
+          )}
           <button
             onClick={fetchEvidence}
             disabled={loading}
@@ -269,10 +593,15 @@ export const EvidenceGallery: React.FC = () => {
             <option value="all">All Objects</option>
             <option value="person">Person</option>
             <option value="car">Car</option>
-            <option value="truck">Truck</option>
+            <option value="truck">Truck / Lorry</option>
             <option value="bus">Bus</option>
             <option value="motorcycle">Motorcycle</option>
             <option value="bicycle">Bicycle</option>
+            <option value="laptop">Laptop</option>
+            <option value="cell phone">Phone</option>
+            <option value="backpack">Backpack / Bag</option>
+            <option value="chair">Furniture</option>
+            <option value="drone">Drone</option>
           </select>
 
           {/* Camera Filter */}
@@ -311,31 +640,37 @@ export const EvidenceGallery: React.FC = () => {
             <option value="RESTRICTED ZONE INTRUSION">Restricted Zone Intrusion</option>
             <option value="ZONE LOITERING DETECTED">Zone Loitering</option>
             <option value="DETECTION">Detection (Confirmed Track)</option>
-            <option value="INTRUSION">General Intrusion</option>
+            <option value="NORMAL DETECTION">Normal Detection</option>
           </select>
         </div>
 
-        {/* Sort row */}
+        {/* Sort & Select All Row */}
         <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#252d42]">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={toggleSelectAll}
+              className="text-xs text-slate-400 hover:text-slate-200 flex items-center gap-1.5 transition-colors font-mono"
+            >
+              {selectedIds.size > 0 && selectedIds.size === items.length ? (
+                <CheckSquare className="w-4 h-4 text-blue-400" />
+              ) : (
+                <Square className="w-4 h-4" />
+              )}
+              {selectedIds.size > 0 ? `Deselect All (${selectedIds.size})` : 'Select All'}
+            </button>
+          </div>
+
           <button
-            onClick={() => setSortOrder((p) => p === 'newest' ? 'oldest' : 'newest')}
-            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+            onClick={() => setSortOrder((o) => (o === 'newest' ? 'oldest' : 'newest'))}
+            className="text-xs text-slate-400 hover:text-slate-200 flex items-center gap-1 transition-colors"
           >
             <ArrowUpDown className="w-3.5 h-3.5 text-blue-400" />
-            Sort: <strong className="text-slate-200">{sortOrder === 'newest' ? 'Newest First' : 'Oldest First'}</strong>
+            Sort: <strong className="text-slate-200 uppercase">{sortOrder === 'newest' ? 'Newest First' : 'Oldest First'}</strong>
           </button>
-          {(search || objectFilter !== 'all' || cameraFilter !== 'all' || severityFilter !== 'all' || eventFilter !== 'all') && (
-            <button
-              onClick={() => { setSearch(''); setObjectFilter('all'); setCameraFilter('all'); setSeverityFilter('all'); setEventFilter('all'); }}
-              className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1"
-            >
-              <X className="w-3 h-3" /> Clear filters
-            </button>
-          )}
         </div>
       </div>
 
-      {/* ── Main Content ── */}
+      {/* ── Content Area ── */}
       {loading ? (
         <div className="p-16 text-center">
           <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
@@ -370,12 +705,16 @@ export const EvidenceGallery: React.FC = () => {
           {sortedItems.map((item, idx) => {
             const imgUrl = resolveImageUrl(item);
             const dt = item.captured_at ? new Date(item.captured_at) : null;
+            const isSelected = selectedIds.has(item.id);
+
             return (
               <div
                 key={item.id}
-                className="bg-[#111622] rounded-xl border border-[#252d42] hover:border-blue-500/50 transition-all overflow-hidden flex flex-col group shadow-xl"
+                className={`bg-[#111622] rounded-xl border transition-all overflow-hidden flex flex-col group shadow-xl relative ${
+                  isSelected ? 'border-blue-500 bg-[#141b2b]' : 'border-[#252d42] hover:border-blue-500/50'
+                }`}
               >
-                {/* Snapshot */}
+                {/* Snapshot Image */}
                 <div
                   className="relative aspect-video bg-slate-950 overflow-hidden cursor-pointer"
                   onClick={() => setLightboxIdx(idx)}
@@ -396,14 +735,33 @@ export const EvidenceGallery: React.FC = () => {
                       No Image
                     </div>
                   )}
+
+                  {/* Selection checkbox */}
+                  <div
+                    className="absolute top-2 left-2 z-10"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleSelectId(item.id);
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => {}}
+                      className="w-4 h-4 rounded border-slate-700 bg-slate-900/90 text-blue-600 focus:ring-0 cursor-pointer shadow"
+                    />
+                  </div>
+
                   {/* Expand icon */}
                   <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/30">
                     <Maximize2 className="w-8 h-8 text-white drop-shadow-lg" />
                   </div>
+
                   {/* Object badge */}
-                  <div className="absolute top-2 left-2 bg-blue-600/90 text-white font-bold text-[10px] px-2 py-0.5 rounded shadow uppercase font-mono">
+                  <div className="absolute top-2 left-8 bg-blue-600/90 text-white font-bold text-[10px] px-2 py-0.5 rounded shadow uppercase font-mono">
                     {getObjectDisplayLabel(item.display_label || item.object_class)} {item.confidence ? `${(item.confidence * 100).toFixed(0)}%` : ''}
                   </div>
+
                   {/* Track badge */}
                   <div className="absolute top-2 right-2 bg-slate-950/90 text-amber-400 font-bold text-[10px] px-2 py-0.5 rounded border border-amber-500/40 font-mono">
                     {item.track_id || '—'}
@@ -429,12 +787,10 @@ export const EvidenceGallery: React.FC = () => {
                     <div className="text-[11px] text-slate-400 space-y-1 font-mono bg-[#0a0d14] p-2.5 rounded-lg border border-[#252d42]">
                       <div>Camera: <strong className="text-blue-400">{item.camera_number || item.camera_id}</strong></div>
                       <div className="truncate">Location: <strong className="text-slate-300">{item.location || '—'}</strong></div>
-                      {dt && (
-                        <div className="text-slate-400 flex flex-wrap gap-x-2">
-                          <span>Date: <strong className="text-slate-200">{dt.toLocaleDateString()}</strong></span>
-                          <span>Time: <strong className="text-slate-200">{dt.toLocaleTimeString()}</strong></span>
-                        </div>
-                      )}
+                      <div className="text-slate-400 flex flex-wrap gap-x-2">
+                        <span>Date: <strong className="text-slate-200">{formatISTDate(item.captured_at || item.created_at || item.timestamp)}</strong></span>
+                        <span>Time: <strong className="text-slate-200">{formatISTTime(item.captured_at || item.created_at || item.timestamp)}</strong></span>
+                      </div>
                       <div className="flex items-center justify-between pt-1 border-t border-[#252d42] mt-1">
                         <span className="text-slate-400">Event: <strong className="text-amber-400 text-[10px] uppercase">{item.event_type || 'NORMAL DETECTION'}</strong></span>
                         <SeverityBadge severity={item.severity || 'INFO'} />
@@ -442,18 +798,31 @@ export const EvidenceGallery: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex gap-2 pt-1">
+                  {/* Actions Row: [ VIEW ] [ DETAILS ] [ 🗑 TRASH ] */}
+                  <div className="flex items-center gap-1.5 pt-1">
                     <button
                       onClick={() => setLightboxIdx(idx)}
                       className="flex-1 py-1.5 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded text-[10px] font-bold uppercase flex items-center justify-center gap-1 border border-[#252d42] transition-colors"
+                      title="View snapshot"
                     >
                       <Maximize2 className="w-3 h-3" /> View
                     </button>
                     <button
                       onClick={() => setSelectedItem(item)}
                       className="flex-1 py-1.5 bg-[#1a2030] hover:bg-blue-600 text-slate-300 hover:text-white rounded text-[10px] font-bold uppercase flex items-center justify-center gap-1 border border-[#252d42] hover:border-blue-500 transition-colors"
+                      title="View metadata details"
                     >
                       <Info className="w-3 h-3" /> Details
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setItemToDelete(item);
+                      }}
+                      className="p-1.5 bg-red-950/30 hover:bg-red-600 text-red-400 hover:text-white rounded border border-red-500/30 hover:border-red-500 transition-all"
+                      title="Delete detection"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
@@ -468,6 +837,14 @@ export const EvidenceGallery: React.FC = () => {
             <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="bg-[#1a2030] border-b border-[#252d42] text-slate-400 uppercase font-mono text-[11px]">
+                  <th className="p-3 w-8">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.size === items.length && items.length > 0}
+                      onChange={toggleSelectAll}
+                      className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-blue-600 cursor-pointer"
+                    />
+                  </th>
                   <th className="p-3">Snapshot</th>
                   <th className="p-3">Object</th>
                   <th className="p-3">Confidence</th>
@@ -476,7 +853,6 @@ export const EvidenceGallery: React.FC = () => {
                   <th className="p-3">Date &amp; Time</th>
                   <th className="p-3">Event</th>
                   <th className="p-3">Severity</th>
-                  <th className="p-3">Risk</th>
                   <th className="p-3">Track ID</th>
                   <th className="p-3 text-right">Actions</th>
                 </tr>
@@ -485,8 +861,18 @@ export const EvidenceGallery: React.FC = () => {
                 {sortedItems.map((item, idx) => {
                   const imgUrl = resolveImageUrl(item);
                   const dt = item.captured_at ? new Date(item.captured_at) : null;
+                  const isSelected = selectedIds.has(item.id);
+
                   return (
-                    <tr key={item.id} className="hover:bg-[#1a2030]/60 transition-colors">
+                    <tr key={item.id} className={`hover:bg-[#1a2030]/60 transition-colors ${isSelected ? 'bg-blue-950/20' : ''}`}>
+                      <td className="p-3">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectId(item.id)}
+                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-blue-600 cursor-pointer"
+                        />
+                      </td>
                       <td className="p-3">
                         <div
                           className="w-16 h-11 bg-slate-950 rounded overflow-hidden cursor-pointer relative group"
@@ -506,12 +892,11 @@ export const EvidenceGallery: React.FC = () => {
                       <td className="p-3 text-emerald-400 font-bold">{item.confidence ? `${(item.confidence * 100).toFixed(0)}%` : '—'}</td>
                       <td className="p-3 text-blue-400 font-bold">{item.camera_number || item.camera_id}</td>
                       <td className="p-3 text-slate-400 truncate max-w-[140px]">{item.location || '—'}</td>
-                      <td className="p-3 text-slate-400 whitespace-nowrap">
-                        {dt ? `${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}` : '—'}
+                      <td className="p-3 text-slate-300 whitespace-nowrap font-mono">
+                        {formatISTDateTime(item.captured_at || item.created_at || item.timestamp)}
                       </td>
                       <td className="p-3 text-amber-400 font-bold max-w-[160px] truncate">{item.event_type}</td>
                       <td className="p-3"><SeverityBadge severity={item.severity || 'INFO'} /></td>
-                      <td className="p-3 font-bold text-red-400">{item.risk_score ?? 0}/100</td>
                       <td className="p-3 text-emerald-400 font-bold">{item.track_id || '—'}</td>
                       <td className="p-3 text-right">
                         <div className="flex items-center justify-end gap-1.5">
@@ -529,9 +914,19 @@ export const EvidenceGallery: React.FC = () => {
                           )}
                           <button
                             onClick={() => setSelectedItem(item)}
-                            className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white rounded border border-blue-500/30 text-[11px] font-bold uppercase transition-colors"
+                            className="px-2.5 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white rounded border border-blue-500/30 text-[11px] font-bold uppercase transition-colors"
                           >
                             Details
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setItemToDelete(item);
+                            }}
+                            className="p-1.5 bg-red-950/40 hover:bg-red-600 text-red-400 hover:text-white rounded border border-red-500/40 text-xs transition-colors"
+                            title="Delete detection"
+                          >
+                            <Trash2 className="w-3 h-3" />
                           </button>
                         </div>
                       </td>
@@ -542,6 +937,26 @@ export const EvidenceGallery: React.FC = () => {
             </table>
           </div>
         </div>
+      )}
+
+      {/* ── Single Delete Confirmation Dialog ── */}
+      {itemToDelete && (
+        <DeleteConfirmationModal
+          item={itemToDelete}
+          isDeleting={isDeleting}
+          onConfirm={handleDeleteConfirm}
+          onCancel={() => setItemToDelete(null)}
+        />
+      )}
+
+      {/* ── Bulk Delete Confirmation Dialog ── */}
+      {showBulkDeleteModal && (
+        <BulkDeleteModal
+          count={selectedIds.size}
+          isDeleting={isDeleting}
+          onConfirm={handleBulkDeleteConfirm}
+          onCancel={() => setShowBulkDeleteModal(false)}
+        />
       )}
 
       {/* ── Lightbox ── */}
@@ -563,10 +978,12 @@ export const EvidenceGallery: React.FC = () => {
       {/* ── Evidence Detail Modal ── */}
       {selectedItem && (
         <EvidenceDetailModal
-          item={{ ...selectedItem, file_url: resolveImageUrl(selectedItem) }}
+          item={selectedItem}
           onClose={() => setSelectedItem(null)}
         />
       )}
     </div>
   );
 };
+
+export default EvidenceGallery;

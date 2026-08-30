@@ -52,8 +52,10 @@ os.makedirs("storage/evidence/snapshots", exist_ok=True)
 os.makedirs("storage/evidence/face/snapshots", exist_ok=True)
 os.makedirs("storage/evidence/face/crops", exist_ok=True)
 os.makedirs("storage/evidence/face/watchlist", exist_ok=True)
+os.makedirs("storage/evidence/anpr/snapshots", exist_ok=True)
 app.mount("/static/evidence", StaticFiles(directory="storage/evidence/snapshots"), name="evidence")
 app.mount("/static/face", StaticFiles(directory="storage/evidence/face"), name="face_static")
+app.mount("/static/anpr", StaticFiles(directory="storage/evidence/anpr"), name="anpr_static")
 
 from fastapi.responses import RedirectResponse, HTMLResponse
 
@@ -143,7 +145,36 @@ async def websocket_endpoint(websocket: WebSocket):
 async def startup_event():
     from backend.stream_manager import stream_manager
     stream_manager.set_loop(asyncio.get_running_loop())
+    _migrate_anpr_schema()
     seed_database()
+
+def _migrate_anpr_schema():
+    """
+    Migrate ANPR schema: drop and recreate anpr_results and anpr_watchlist tables
+    if they use the old schema (plate_text column instead of plate_number).
+    This is a one-time destructive migration — old simulation records are discarded.
+    """
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+
+    # Check anpr_results table columns
+    anpr_cols = {c['name'] for c in inspector.get_columns('anpr_results')} if inspector.has_table('anpr_results') else set()
+    needs_migration = 'plate_text' in anpr_cols or 'plate_number' not in anpr_cols
+
+    if needs_migration:
+        logger.info("[MIGRATION] ANPR schema upgrade: dropping old anpr_results table")
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS anpr_results"))
+                conn.execute(text("DROP TABLE IF EXISTS anpr_watchlist"))
+                conn.commit()
+            # Recreate with current schema
+            Base.metadata.create_all(bind=engine)
+            logger.info("[MIGRATION] ANPR schema upgrade complete — anpr_results & anpr_watchlist recreated")
+        except Exception as e:
+            logger.error(f"[MIGRATION] ANPR schema migration failed: {e}")
+    else:
+        logger.info("[MIGRATION] ANPR schema is current — no migration needed")
 
 def seed_database():
     db = SessionLocal()

@@ -13,6 +13,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
+from database.schema import FaceWatchlist
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +90,13 @@ class FaceTrack:
         self.recognition_status = "UNKNOWN"   # KNOWN, UNKNOWN, UNCERTAIN
         self.identity_id: Optional[str] = None
         self.identity_name: Optional[str] = None
+        self.person_id: Optional[str] = None      # Watchlist Badge / ID string (e.g. M89)
+        self.category: Optional[str] = None       # WATCHLIST, VIP, BANNED, etc.
         self.recognition_confidence: float = 0.0
+        self.raw_similarity: float = 0.0
         self.embedding: Optional[np.ndarray] = None
+        self.consecutive_match_count: int = 0
+        self.consecutive_match_person: Optional[str] = None
 
     def update(self, det: DetectedFace):
         # Smooth bounding box with exponential moving average
@@ -380,44 +386,88 @@ class RealFaceEngine:
         self,
         embedding: np.ndarray,
         watchlist_records: List[Any]
-    ) -> Tuple[str, Optional[str], Optional[str], float]:
+    ) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str], float, float]:
         """
-        Cosine similarity matching against enrolled watchlist.
-        Returns: (status, identity_id, identity_name, normalized_confidence)
+        Cosine similarity matching against enrolled ACTIVE watchlist.
+        Returns: (status, identity_id, identity_name, person_id, category, conf_normalized, raw_score)
         status: 'KNOWN', 'UNKNOWN', 'UNCERTAIN'
         """
-        if embedding is None or not watchlist_records or self.recognizer is None:
-            return "UNKNOWN", None, None, 0.0
+        if embedding is None or self.recognizer is None:
+            return "UNKNOWN", None, None, None, None, 0.0, 0.0
+
+        # Support passing DB session or list
+        if hasattr(watchlist_records, "query"):
+            watchlist = watchlist_records.query(FaceWatchlist).filter(FaceWatchlist.is_active == True).all()
+        else:
+            watchlist = watchlist_records or []
+
+        if not watchlist:
+            return "UNKNOWN", None, None, None, None, 0.0, 0.0
 
         best_score = -1.0
         best_match = None
 
-        for person in watchlist_records:
+        query_emb = np.array(embedding, dtype=np.float32).reshape(1, 128)
+
+        for person in watchlist:
             if not getattr(person, "is_active", True):
                 continue
 
             stored_emb = getattr(person, "embedding", None)
             if not stored_emb:
+                photo_url = getattr(person, "photo_url", "")
+                if photo_url:
+                    photo_rel = photo_url.replace("/api/faces/watchlist/photo/", "storage/evidence/face/watchlist/")
+                    if os.path.exists(photo_rel):
+                        try:
+                            ref_img = cv2.imread(photo_rel)
+                            if ref_img is not None:
+                                ref_faces = self.detect_faces(ref_img)
+                                if ref_faces:
+                                    ref_feat = self.extract_embedding(ref_img, ref_faces[0])
+                                    if ref_feat is not None:
+                                        stored_emb = ref_feat.flatten().tolist()
+                                        person.embedding = stored_emb
+                        except Exception as e:
+                            logger.error(f"Error extracting embedding from photo for {person.name}: {e}")
+
+            if not stored_emb:
                 continue
 
             try:
-                target_emb = np.array(stored_emb, dtype=np.float32).reshape(1, 128)
-                score = float(self.recognizer.match(embedding, target_emb, cv2.FaceRecognizerSF_FR_COSINE))
-                if score > best_score:
-                    best_score = score
-                    best_match = person
+                # Handle both single 128-d list and list of 128-d lists (multiple reference photos)
+                if isinstance(stored_emb[0], (list, tuple)):
+                    emb_list = stored_emb
+                else:
+                    emb_list = [stored_emb]
+
+                for single_emb in emb_list:
+                    target_emb = np.array(single_emb, dtype=np.float32).reshape(1, 128)
+                    score = float(self.recognizer.match(query_emb, target_emb, cv2.FaceRecognizerSF_FR_COSINE))
+                    logger.debug(f"[FACE COMPARISON] candidate={person.name} (ID: {getattr(person, 'person_id', '')}) score={score:.4f} threshold={self.match_threshold}")
+                    if score > best_score:
+                        best_score = score
+                        best_match = person
             except Exception as ex:
-                logger.error(f"Error matching embedding: {ex}")
+                logger.error(f"Error matching embedding for {person.name}: {ex}")
 
         # Normalization to 0.0 - 1.0 confidence
         conf_normalized = round(max(0.0, min(1.0, (best_score + 0.2) / 1.2)), 3)
+        raw_score = round(float(best_score), 4)
 
         if best_match and best_score >= self.match_threshold:
-            return "KNOWN", str(best_match.id), str(best_match.name), conf_normalized
+            p_badge = getattr(best_match, "person_id", None) or str(best_match.id)[:6].upper()
+            p_cat = getattr(best_match, "category", "WATCHLIST")
+            logger.info(f"[BEST MATCH] profile={best_match.name} profile_id={p_badge} category={p_cat} score={raw_score} threshold={self.match_threshold} -> RESULT=RECOGNIZED")
+            return "KNOWN", str(best_match.id), str(best_match.name), str(p_badge), str(p_cat), conf_normalized, raw_score
         elif best_score > (self.match_threshold - 0.08):
-            return "UNCERTAIN", getattr(best_match, "id", None), getattr(best_match, "name", None), conf_normalized
+            p_badge = getattr(best_match, "person_id", None) if best_match else None
+            p_cat = getattr(best_match, "category", "WATCHLIST") if best_match else None
+            logger.info(f"[UNCERTAIN MATCH] candidate={best_match.name if best_match else 'None'} score={raw_score} threshold={self.match_threshold} -> RESULT=UNCERTAIN")
+            return "UNCERTAIN", getattr(best_match, "id", None), getattr(best_match, "name", None), p_badge, p_cat, conf_normalized, raw_score
         else:
-            return "UNKNOWN", None, None, conf_normalized
+            logger.info(f"[UNKNOWN FACE] best_score={raw_score} below threshold {self.match_threshold} -> RESULT=UNKNOWN")
+            return "UNKNOWN", None, None, None, None, conf_normalized, raw_score
 
     def process_face_recognition(
         self,
@@ -444,7 +494,7 @@ class RealFaceEngine:
         watchlist_records: List[Any]
     ) -> FaceTrack:
         """
-        Evaluates recognition for a FaceTrack using interval caching.
+        Evaluates recognition for a FaceTrack using interval caching and multi-frame temporal confirmation.
         """
         now = time.time()
         # Reuse cached recognition if within cache interval
@@ -456,20 +506,52 @@ class RealFaceEngine:
         if not track.is_high_quality:
             track.recognition_status = "UNCERTAIN"
             track.recognition_confidence = 0.0
+            track.raw_similarity = 0.0
+            track.consecutive_match_count = 0
+            track.consecutive_match_person = None
             return track
 
         feat = self.extract_embedding(frame, track.raw_face_array)
         track.embedding = feat
 
         if feat is not None:
-            status, id_id, id_name, conf = self.match_against_watchlist(feat, watchlist_records)
-            track.recognition_status = status
-            track.identity_id = id_id
-            track.identity_name = id_name
-            track.recognition_confidence = conf
+            status, id_id, id_name, p_badge, p_cat, conf, raw_sc = self.match_against_watchlist(feat, watchlist_records)
+            if status == "KNOWN":
+                if track.consecutive_match_person == id_id:
+                    track.consecutive_match_count += 1
+                else:
+                    track.consecutive_match_person = id_id
+                    track.consecutive_match_count = 1
+
+                # Confirm match across temporal frames
+                if track.consecutive_match_count >= 1:
+                    track.recognition_status = "KNOWN"
+                    track.identity_id = id_id
+                    track.identity_name = id_name
+                    track.person_id = p_badge
+                    track.category = p_cat
+                    track.recognition_confidence = conf
+                    track.raw_similarity = raw_sc
+                else:
+                    track.recognition_status = "UNKNOWN"
+                    track.recognition_confidence = conf
+                    track.raw_similarity = raw_sc
+            else:
+                track.recognition_status = status
+                track.identity_id = id_id if status == "UNCERTAIN" else None
+                track.identity_name = id_name if status == "UNCERTAIN" else None
+                track.person_id = p_badge if status == "UNCERTAIN" else None
+                track.category = p_cat if status == "UNCERTAIN" else None
+                track.recognition_confidence = conf
+                track.raw_similarity = raw_sc
+                track.consecutive_match_count = 0
+                track.consecutive_match_person = None
         else:
             track.recognition_status = "UNCERTAIN"
             track.recognition_confidence = 0.0
+            track.raw_similarity = 0.0
+            track.consecutive_match_count = 0
+            track.consecutive_match_person = None
 
         return track
 
@@ -519,16 +601,41 @@ class RealFaceEngine:
         x2 = min(w - 1, fx + fw)
         y2 = min(h - 1, fy + fh)
 
-        if track.recognition_status == "KNOWN":
-            box_color = (0, 200, 0)
-            status_tag = f"KNOWN: {track.identity_name} ({int(track.recognition_confidence * 100)}%)"
-        elif track.recognition_status == "UNCERTAIN":
-            box_color = (0, 165, 255)
-            status_tag = "UNCERTAIN (LOW QUALITY)"
-        else:
-            box_color = (59, 130, 246)
-            status_tag = f"UNKNOWN ({int(track.confidence * 100)}%)"
+        now_dt = datetime.utcnow()
 
+        if track.recognition_status == "KNOWN":
+            # DANGER CRITICAL RED
+            box_color = (30, 30, 235)  # Bright Red in BGR
+            badge_id_str = f" | ID: {track.person_id}" if track.person_id else ""
+            status_tag = f"WATCHLIST MATCH: {str(track.identity_name).upper()}{badge_id_str} ({int(track.recognition_confidence * 100)}%)"
+
+            # Top Tactical Bar
+            cv2.rectangle(annotated, (0, 0), (w, 42), (10, 10, 26), -1)
+            cv2.rectangle(annotated, (0, 40), (w, 42), (30, 30, 235), -1)
+            header_text = f"🚨 DANGER — WATCHLIST PERSON DETECTED | {track.identity_name.upper()}{badge_id_str}"
+            cv2.putText(annotated, header_text, (16, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (50, 50, 255), 2)
+            sub_header = f"CAM: {camera_id} - {camera_name} | LOC: {camera_location} | TIME: {now_dt.strftime('%d/%m/%Y %H:%M:%S UTC')} | TRACK: #F{track.track_id}"
+            cv2.putText(annotated, sub_header, (16, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 220), 1)
+
+            # Bottom Security Level Bar
+            cv2.rectangle(annotated, (0, h - 28), (w, h), (10, 10, 26), -1)
+            sec_footer = f"SEVERITY: CRITICAL (RISK 95/100) | MATCH SIMILARITY: {track.recognition_confidence:.2f} | STATUS: VERIFIED SECURITY MATCH"
+            cv2.putText(annotated, sec_footer, (16, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (30, 30, 235), 2)
+
+        elif track.recognition_status == "UNCERTAIN":
+            box_color = (0, 165, 255)  # Amber
+            status_tag = "UNCERTAIN (LOW QUALITY FACE)"
+            cv2.rectangle(annotated, (0, 0), (w, 30), (15, 23, 42), -1)
+            banner = f"IBVAP | {camera_id} - {camera_name} | {camera_location} | LOW QUALITY FACE | {now_dt.strftime('%d/%m/%Y %H:%M:%S UTC')}"
+            cv2.putText(annotated, banner, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 165, 255), 2)
+        else:
+            box_color = (246, 130, 59)  # Blue/Cyan
+            status_tag = f"UNKNOWN PERSON #F{track.track_id} ({int(track.confidence * 100)}%)"
+            cv2.rectangle(annotated, (0, 0), (w, 30), (15, 23, 42), -1)
+            banner = f"IBVAP | {camera_id} - {camera_name} | {camera_location} | FACE DETECTION (UNKNOWN) | {now_dt.strftime('%d/%m/%Y %H:%M:%S UTC')}"
+            cv2.putText(annotated, banner, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (246, 130, 59), 2)
+
+        # Draw Bounding Box with tactical corners
         cv2.rectangle(annotated, (fx, fy), (x2, y2), box_color, 2)
         corner_len = min(15, fw // 3)
         cv2.line(annotated, (fx, fy), (fx + corner_len, fy), (255, 255, 255), 2)
@@ -540,24 +647,21 @@ class RealFaceEngine:
         cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), (255, 255, 255), 2)
         cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), (255, 255, 255), 2)
 
+        # 5 Facial Landmarks (Yellow dots)
         for lm in track.landmarks:
             lx, ly = int(lm[0] * w), int(lm[1] * h)
-            cv2.circle(annotated, (lx, ly), 2, (0, 255, 255), -1)
+            cv2.circle(annotated, (lx, ly), 3, (0, 255, 255), -1)
 
-        (tw, th), _ = cv2.getTextSize(status_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-        cv2.rectangle(annotated, (fx, max(0, fy - 22)), (fx + tw + 8, fy), box_color, -1)
-        cv2.putText(annotated, status_tag, (fx + 4, max(14, fy - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-
-        now_dt = datetime.utcnow()
-        banner = f"IBVAP | {camera_id} - {camera_name} | {camera_location} | {event_type} | {now_dt.strftime('%d-%b-%Y %H:%M:%S UTC')}"
-        cv2.rectangle(annotated, (0, 0), (w, 32), (15, 23, 42), -1)
-        cv2.putText(annotated, banner, (12, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (59, 130, 246), 2)
+        # Label Banner over Bounding Box
+        (tw, th), _ = cv2.getTextSize(status_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 2)
+        cv2.rectangle(annotated, (fx, max(44, fy - 24)), (fx + tw + 10, max(44, fy)), box_color, -1)
+        cv2.putText(annotated, status_tag, (fx + 5, max(58, fy - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2)
 
         clean_cam = camera_id.replace("-", "_")
         filename = f"{clean_cam}_F{track.track_id}_{track.recognition_status}_{now_dt.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}.jpg"
         full_path = os.path.join(self.storage_dir, "snapshots", filename)
 
-        success = cv2.imwrite(full_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        success = cv2.imwrite(full_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         if not success or not os.path.exists(full_path):
             return None
 

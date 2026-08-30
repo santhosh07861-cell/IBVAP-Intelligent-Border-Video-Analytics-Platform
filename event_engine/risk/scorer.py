@@ -3,13 +3,14 @@ from typing import Dict, Any
 class OperationalRiskScorer:
     def __init__(self, custom_weights: Dict[str, float] = None):
         self.weights = {
-            "night_mode": 20.0,
-            "restricted_zone": 30.0,
-            "fence_crossing": 30.0,
-            "loitering": 10.0,
-            "repeated_crossing": 15.0,
-            "vehicle_stopping": 15.0,
-            "crowd_threshold": 10.0
+            "night_mode": 15.0,
+            "restricted_zone": 40.0,
+            "fence_crossing": 35.0,
+            "loitering": 25.0,
+            "unknown_person": 35.0,
+            "repeated_crossing": 20.0,
+            "vehicle_stopping": 20.0,
+            "crowd_threshold": 15.0
         }
         if custom_weights:
             self.weights.update(custom_weights)
@@ -32,11 +33,11 @@ class OperationalRiskScorer:
 
         if score <= 20.0:
             severity = "INFO"
-        elif score <= 40.0:
+        elif score <= 45.0:
             severity = "LOW"
-        elif score <= 60.0:
+        elif score <= 65.0:
             severity = "MEDIUM"
-        elif score <= 80.0:
+        elif score <= 84.0:
             severity = "HIGH"
         else:
             severity = "CRITICAL"

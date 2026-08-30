@@ -14,7 +14,7 @@ import { ZoneEditor } from './pages/ZoneEditor';
 import { AlertList } from './pages/AlertList';
 import { IncidentList } from './pages/IncidentList';
 import { IncidentDetail } from './pages/IncidentDetail';
-import { ANPRView } from './pages/ANPRView';
+import ANPRView from './pages/ANPRView';
 import { FaceView } from './pages/FaceView';
 import { Analytics } from './pages/Analytics';
 import { HealthView } from './pages/HealthView';

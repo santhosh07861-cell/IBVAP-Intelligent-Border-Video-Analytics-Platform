@@ -7,6 +7,7 @@ class DetectionBox(pydantic.BaseModel):
     detection_id: str
     camera_id: str
     timestamp: datetime
+    class_id: int = 0
     class_name: str
     confidence: float
     bbox: List[float]  # [x, y, width, height] normalized (0.0 to 1.0)

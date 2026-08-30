@@ -98,6 +98,10 @@ def get_face_detections(
         cam_name = cam.name if cam else "Border Surveillance Camera"
         location = cam.location or "Sector 4 Border Outpost" if cam else "Sector 4 Border Outpost"
 
+        wl_entry = db.query(FaceWatchlist).filter(FaceWatchlist.id == r.identity_id).first() if r.identity_id else None
+        p_badge = wl_entry.person_id if wl_entry else (r.identity_id[:6].upper() if r.identity_id else None)
+        p_cat = wl_entry.category if wl_entry else "WATCHLIST"
+
         items.append({
             "id": r.id,
             "camera_id": r.camera_id,
@@ -107,6 +111,8 @@ def get_face_detections(
             "track_id": r.track_id,
             "identity_id": r.identity_id,
             "identity_name": r.identity_name or "UNKNOWN",
+            "person_id": p_badge,
+            "category": p_cat,
             "recognition_status": r.recognition_status,
             "detection_confidence": r.detection_confidence,
             "recognition_confidence": r.recognition_confidence,
@@ -157,10 +163,11 @@ def get_face_kpis(
     total_watchlist = db.query(FaceWatchlist).filter(FaceWatchlist.is_active == True).count()
     monitored_cams = db.query(Camera).filter(Camera.status == "ONLINE").count()
     total_matches_db = db.query(FaceDetection).filter(FaceDetection.recognition_status == "KNOWN").count()
+    total_24h_db = db.query(FaceDetection).filter(FaceDetection.timestamp >= datetime.utcnow() - timedelta(hours=24)).count()
 
     return {
         "active_faces": active_faces_count,
-        "total_detections_24h": active_faces_count,
+        "total_detections_24h": total_24h_db,
         "known_faces": known_active,
         "unknown_faces": unknown_active,
         "uncertain_faces": uncertain_active,
@@ -331,9 +338,18 @@ async def enroll_person(
     }
 
 
+from pydantic import BaseModel
+
+class WatchlistUpdatePayload(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    is_active: Optional[bool] = None
+    notes: Optional[str] = None
+
 @router.put("/watchlist/{entry_id}")
-def update_watchlist_entry(
+async def update_watchlist_entry(
     entry_id: str,
+    payload: Optional[WatchlistUpdatePayload] = None,
     name: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
     is_active: Optional[bool] = Form(None),
@@ -345,29 +361,61 @@ def update_watchlist_entry(
     if not entry:
         raise HTTPException(status_code=404, detail="Watchlist entry not found.")
 
-    if name is not None:
-        entry.name = name.strip()
-    if category is not None:
-        entry.category = category.upper().strip()
-    if is_active is not None:
-        entry.is_active = is_active
-    if notes is not None:
-        entry.notes = notes
+    up_name = payload.name if payload and payload.name is not None else name
+    up_cat = payload.category if payload and payload.category is not None else category
+    up_active = payload.is_active if payload and payload.is_active is not None else is_active
+    up_notes = payload.notes if payload and payload.notes is not None else notes
+
+    if up_name is not None:
+        entry.name = up_name.strip()
+    if up_cat is not None:
+        entry.category = up_cat.upper().strip()
+    if up_active is not None:
+        entry.is_active = bool(up_active)
+    if up_notes is not None:
+        entry.notes = up_notes
 
     entry.updated_at = datetime.utcnow()
     db.commit()
-    return {"success": True, "message": "Watchlist entry updated."}
+    db.refresh(entry)
+
+    # Audit log
+    audit = AuditLog(
+        username=current_user.username if current_user else "admin",
+        action="UPDATE_FACE_WATCHLIST",
+        resource="face_watchlist",
+        details={"person_id": entry.person_id, "name": entry.name, "is_active": entry.is_active}
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"Watchlist entry for {entry.name} updated.",
+        "entry": {
+            "id": entry.id,
+            "name": entry.name,
+            "person_id": entry.person_id,
+            "category": entry.category,
+            "is_active": entry.is_active,
+            "notes": entry.notes,
+            "photo_url": entry.photo_url
+        }
+    }
 
 
 @router.delete("/watchlist/{entry_id}")
 def delete_watchlist_entry(
     entry_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(RequireRole(["ADMIN", "ADMINISTRATOR"]))
+    current_user=Depends(RequireRole(["Administrator", "Admin"]))
 ):
     entry = db.query(FaceWatchlist).filter(FaceWatchlist.id == entry_id).first()
     if not entry:
         raise HTTPException(status_code=404, detail="Watchlist entry not found.")
+
+    entry_name = entry.name
+    p_id = entry.person_id
 
     # Remove photo if exists
     if entry.photo_url:
@@ -379,6 +427,121 @@ def delete_watchlist_entry(
             except Exception:
                 pass
 
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="DELETE_FACE_WATCHLIST",
+        resource="face_watchlist",
+        details={"entry_id": entry_id, "name": entry_name, "person_id": p_id}
+    )
+    db.add(audit)
     db.delete(entry)
     db.commit()
     return {"success": True, "message": "Watchlist entry deleted."}
+
+
+class BulkDeleteFaceRequest(BaseModel):
+    detection_ids: List[str]
+
+
+@router.delete("/detections/{detection_id}")
+@router.delete("/{detection_id}")
+def delete_face_detection(
+    detection_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(RequireRole(["Administrator", "Security Operator"]))
+):
+    """
+    Deletes a historical FaceDetection record and its associated crop/snapshot files.
+    Does NOT modify or delete FaceWatchlist entries.
+    """
+    rec = db.query(FaceDetection).filter(FaceDetection.id == detection_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Face detection record not found.")
+
+    # Safely clean up associated crop and snapshot files
+    for url in [rec.crop_url, rec.snapshot_url]:
+        if url:
+            fname = os.path.basename(url)
+            for sub in ["crops", "snapshots"]:
+                p = os.path.join("storage/evidence/face", sub, fname)
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        logger.info(f"[FACE CLEANUP] Deleted {p}")
+                    except Exception as e:
+                        logger.error(f"[FACE CLEANUP] Error deleting {p}: {e}")
+
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="DELETE_FACE_DETECTION",
+        resource="face_detections",
+        details={
+            "detection_id": detection_id,
+            "camera_id": rec.camera_id,
+            "identity_name": rec.identity_name,
+            "status": rec.recognition_status
+        }
+    )
+    db.add(audit)
+    db.delete(rec)
+    db.commit()
+    return {"success": True, "message": "Face detection record deleted successfully.", "deleted_id": detection_id}
+
+
+@router.post("/detections/bulk-delete", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def bulk_delete_face_detections(
+    payload: BulkDeleteFaceRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """
+    Permanently bulk-deletes multiple historical FaceDetection records and associated files.
+    """
+    if not payload.detection_ids:
+        raise HTTPException(status_code=400, detail="No detection IDs provided for deletion")
+
+    if len(payload.detection_ids) > 100:
+        raise HTTPException(status_code=400, detail="Cannot delete more than 100 face records at once")
+
+    items = db.query(FaceDetection).filter(FaceDetection.id.in_(payload.detection_ids)).all()
+    if not items:
+        return {"success": True, "deleted_count": 0, "deleted_ids": [], "message": "No matching face records found"}
+
+    deleted_ids = []
+    for item in items:
+        deleted_ids.append(item.id)
+        for url in [item.crop_url, item.snapshot_url]:
+            if url:
+                fname = os.path.basename(url)
+                for sub in ["crops", "snapshots"]:
+                    p = os.path.join("storage/evidence/face", sub, fname)
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+        db.delete(item)
+
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="BULK_DELETE_FACE_DETECTIONS",
+        resource="face_detections",
+        details={
+            "deleted_count": len(deleted_ids),
+            "deleted_ids": deleted_ids
+        }
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "message": f"Successfully deleted {len(deleted_ids)} face detection records"
+    }
+
+

@@ -34,19 +34,24 @@ def list_incidents(
     incidents = query.order_by(Incident.created_at.desc()).limit(limit).all()
     res = []
     for inc in incidents:
+        cam = db.query(Camera).filter((Camera.id == inc.camera_id) | (Camera.camera_id == inc.camera_id)).first()
+        cam_display = f"{cam.camera_id} - {cam.name}" if cam else inc.camera_id
         ev_count = db.query(Evidence).filter(Evidence.incident_id == inc.id).count()
         notes_count = db.query(IncidentNote).filter(IncidentNote.incident_id == inc.id).count()
         res.append({
             "id": inc.id,
             "incident_number": inc.incident_number,
             "camera_id": inc.camera_id,
+            "camera_name": cam.name if cam else "Camera",
+            "camera_number": cam.camera_id if cam else inc.camera_id,
+            "camera_display": cam_display,
             "title": inc.title,
             "description": inc.description,
             "severity": inc.severity,
             "risk_score": inc.risk_score,
             "status": inc.status,
-            "start_time": inc.start_time,
-            "created_at": inc.created_at,
+            "start_time": f"{inc.start_time.isoformat()}Z" if inc.start_time else None,
+            "created_at": f"{inc.created_at.isoformat()}Z" if inc.created_at else None,
             "evidence_count": ev_count,
             "notes_count": notes_count
         })
@@ -134,3 +139,111 @@ def add_incident_note(incident_id: str, payload: NoteCreate, db: Session = Depen
     db.refresh(note)
 
     return {"status": "success", "note_id": note.id, "author_name": note.author_name, "note_text": note.note_text, "created_at": note.created_at}
+
+
+class BulkDeleteIncidentRequest(BaseModel):
+    incident_ids: List[str]
+
+
+@router.delete("/{incident_id}", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def delete_incident(
+    incident_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Permanently deletes a security incident record from the database.
+    Creates an immutable audit log entry.
+    """
+    inc = db.query(Incident).filter((Incident.id == incident_id) | (Incident.incident_number == incident_id)).first()
+    if not inc:
+        raise HTTPException(status_code=404, detail=f"Incident #{incident_id} not found")
+
+    target_id = inc.id
+    inc_num = inc.incident_number
+    cam_id = inc.camera_id
+    title = inc.title
+    sev = inc.severity
+
+    # Record audit log
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="DELETE_INCIDENT",
+        resource="incidents",
+        details={
+            "incident_id": target_id,
+            "incident_number": inc_num,
+            "camera_id": cam_id,
+            "title": title,
+            "severity": sev
+        }
+    )
+    db.add(audit)
+
+    # Disassociate evidence so snapshots are preserved in gallery
+    db.query(Evidence).filter(Evidence.incident_id == target_id).update({Evidence.incident_id: None}, synchronize_session=False)
+
+    # Delete notes
+    db.query(IncidentNote).filter(IncidentNote.incident_id == target_id).delete(synchronize_session=False)
+
+    # Delete incident
+    db.delete(inc)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"Incident {inc_num} deleted successfully",
+        "deleted_id": target_id
+    }
+
+
+@router.post("/bulk-delete", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def bulk_delete_incidents(
+    payload: BulkDeleteIncidentRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Permanently bulk-deletes multiple security incident records from the database.
+    """
+    if not payload.incident_ids:
+        raise HTTPException(status_code=400, detail="No incident IDs provided for deletion")
+
+    if len(payload.incident_ids) > 100:
+        raise HTTPException(status_code=400, detail="Cannot delete more than 100 incidents at once")
+
+    items = db.query(Incident).filter(
+        (Incident.id.in_(payload.incident_ids)) | (Incident.incident_number.in_(payload.incident_ids))
+    ).all()
+    if not items:
+        return {"success": True, "deleted_count": 0, "deleted_ids": [], "message": "No matching incidents found"}
+
+    deleted_ids = []
+    for item in items:
+        deleted_ids.append(item.id)
+        # Disassociate evidence
+        db.query(Evidence).filter(Evidence.incident_id == item.id).update({Evidence.incident_id: None}, synchronize_session=False)
+        db.query(IncidentNote).filter(IncidentNote.incident_id == item.id).delete(synchronize_session=False)
+        db.delete(item)
+
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="BULK_DELETE_INCIDENTS",
+        resource="incidents",
+        details={
+            "deleted_count": len(deleted_ids),
+            "deleted_ids": deleted_ids
+        }
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "message": f"Successfully deleted {len(deleted_ids)} incident records"
+    }
+

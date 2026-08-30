@@ -1,5 +1,6 @@
 import React from 'react';
 import { X, Camera, ShieldAlert, Cpu, Clock, MapPin, Download, CheckCircle2 } from 'lucide-react';
+import { formatISTDate, formatISTTime, formatISTDateTime } from '../utils/timeFormat';
 
 interface EvidenceDetailModalProps {
   item: any;
@@ -9,20 +10,22 @@ interface EvidenceDetailModalProps {
 export const EvidenceDetailModal: React.FC<EvidenceDetailModalProps> = ({ item, onClose }) => {
   if (!item) return null;
 
-  const cleanCls = (item.object_class || 'person').toLowerCase().trim();
-  const objectClass = item.display_label || ((cleanCls === 'truck' || cleanCls === 'lorry') ? 'TRUCK / LORRY' : cleanCls.toUpperCase());
-  const confidencePct = `${((item.confidence || 0.90) * 100).toFixed(0)}%`;
+  const cleanCls = (item.object_class || 'unknown').toLowerCase().trim();
+  const objectClass = item.display_label || ((cleanCls === 'truck' || cleanCls === 'lorry') ? 'TRUCK / LORRY' : cleanCls === 'unknown' ? 'UNKNOWN OBJECT' : cleanCls.toUpperCase());
+  const confidencePct = `${((item.confidence || 0.0) * 100).toFixed(0)}%`;
   const cameraNumber = item.camera_number || item.camera_id || 'CAM-01';
   const cameraName = item.camera_name || 'Border Surveillance Outpost Camera';
   const location = item.location || 'Sector 4 / Gate 2';
-  const eventType = item.event_type || 'RESTRICTED ZONE INTRUSION';
-  const severity = item.severity || 'HIGH';
-  const riskScore = item.risk_score || 75;
-  const trackId = item.track_id || 'P-101';
-  const dateStr = item.captured_at ? new Date(item.captured_at).toLocaleDateString() : new Date().toLocaleDateString();
-  const timeStr = item.captured_at ? new Date(item.captured_at).toLocaleTimeString() : new Date().toLocaleTimeString();
-  const utcStr = item.captured_at ? new Date(item.captured_at).toUTCString() : new Date().toUTCString();
-  const bboxStr = item.bbox ? JSON.stringify(item.bbox) : '[0.25, 0.20, 0.40, 0.65]';
+  const eventType = item.event_type || 'NORMAL DETECTION';
+  const severity = item.severity || 'INFO';
+  const riskScore = item.risk_score || 0;
+  const trackId = item.track_id || 'N/A';
+  const ts = item.captured_at || item.timestamp || item.created_at;
+  const dateStr = formatISTDate(ts);
+  const timeStr = formatISTTime(ts);
+  const fullDateTimeStr = formatISTDateTime(ts);
+  const isoStr = ts ? String(ts) : '—';
+  const bboxStr = item.bbox ? JSON.stringify(item.bbox) : 'N/A';
 
   const severityColor =
     severity === 'CRITICAL' ? 'bg-red-500/20 text-red-400 border-red-500/40' :
@@ -169,7 +172,7 @@ export const EvidenceDetailModal: React.FC<EvidenceDetailModalProps> = ({ item, 
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">ISO UTC:</span>
-                  <strong className="text-slate-500 text-[10px]">{utcStr}</strong>
+                  <strong className="text-slate-500 text-[10px]">{isoStr}</strong>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">Verification:</span>

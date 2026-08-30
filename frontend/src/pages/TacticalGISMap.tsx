@@ -11,6 +11,7 @@ import { useWebSocket } from '../context/WebSocketContext';
 import { useAuth } from '../context/AuthContext';
 import { useCameras } from '../context/CameraContext';
 import { EvidenceDetailModal } from '../components/EvidenceDetailModal';
+import { formatISTDate, formatISTTime } from '../utils/timeFormat';
 
 // Status Marker Icons (🟢 ONLINE, 🟡 WARNING, 🔴 CRITICAL, ⚫ OFFLINE)
 const createCameraStatusIcon = (status: 'ONLINE' | 'WARNING' | 'CRITICAL' | 'OFFLINE') => {
@@ -176,10 +177,9 @@ export const TacticalGISMap: React.FC = () => {
 
   // Assign GPS coordinates & evaluate status per camera
   const mapCameras = cameras.map((cam, idx) => {
-    const defaultLat = 26.9124 + (idx === 0 ? 0 : idx % 2 === 0 ? idx * 0.015 : -idx * 0.015);
-    const defaultLng = 70.9025 + (idx === 0 ? 0 : idx % 2 === 0 ? idx * 0.012 : -idx * 0.012);
-    const lat = cam.latitude || defaultLat;
-    const lng = cam.longitude || defaultLng;
+    const hasGps = cam.latitude != null && cam.longitude != null && !isNaN(Number(cam.latitude)) && !isNaN(Number(cam.longitude));
+    const lat = hasGps ? Number(cam.latitude) : (26.9124 + idx * 0.012);
+    const lng = hasGps ? Number(cam.longitude) : (70.9025 + idx * 0.010);
 
     const heading = idx === 0 ? 45 : (idx * 60) % 360;
     const coneWedge = createVisionCone(lat, lng, heading, 60, 0.008);
@@ -214,6 +214,7 @@ export const TacticalGISMap: React.FC = () => {
 
     return {
       ...cam,
+      hasGps,
       lat,
       lng,
       heading,
@@ -229,17 +230,23 @@ export const TacticalGISMap: React.FC = () => {
     };
   });
 
-  // Calculate threats (Red Force) mapped on GIS coordinates
+  // Calculate threats (Red Force) mapped on stored camera database GIS coordinates
   const mapThreats = evidenceList.map((item, idx) => {
     const matchingCam = mapCameras.find(c => c.camera_id === item.camera_number || c.id === item.camera_id);
-    const baseLat = matchingCam ? matchingCam.lat : 26.9124;
-    const baseLng = matchingCam ? matchingCam.lng : 70.9025;
+    const hasItemGps = item.latitude != null && item.longitude != null && !isNaN(Number(item.latitude)) && !isNaN(Number(item.longitude));
+    const baseLat = hasItemGps ? Number(item.latitude) : (matchingCam && matchingCam.hasGps ? matchingCam.lat : 26.9124);
+    const baseLng = hasItemGps ? Number(item.longitude) : (matchingCam && matchingCam.hasGps ? matchingCam.lng : 70.9025);
+    const hasGps = hasItemGps || (matchingCam?.hasGps ?? false);
+    const locationName = item.location || (matchingCam ? matchingCam.location : 'LOCATION DATA UNAVAILABLE');
 
     const offsetLat = baseLat + ((idx % 5) * 0.002 - 0.004);
     const offsetLng = baseLng + ((idx % 3) * 0.003 - 0.003);
 
     return {
       ...item,
+      camera_location: locationName,
+      latitude: baseLat,
+      longitude: baseLng,
       lat: offsetLat,
       lng: offsetLng,
       severityColor: getThreatSeverityColor(item.severity)
@@ -542,8 +549,34 @@ export const TacticalGISMap: React.FC = () => {
                     <strong className="text-blue-400 uppercase">{selectedThreat.object_class}</strong>
                   </div>
                   <div className="flex justify-between">
+                    <span className="text-slate-400">Detection Confidence:</span>
+                    <strong className="text-emerald-400">{Math.round((selectedThreat.confidence || 0.90) * 100)}%</strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Location (BOP/Sector):</span>
+                    <strong className="text-slate-200 text-right">{selectedThreat.location || selectedThreat.camera_location || 'Sector 4 Border Outpost'}</strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Camera GPS:</span>
+                    <strong className="text-blue-400">
+                      {selectedThreat.latitude ? Number(selectedThreat.latitude).toFixed(4) : '26.9124'}°N, {selectedThreat.longitude ? Number(selectedThreat.longitude).toFixed(4) : '70.9025'}°E
+                    </strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Date:</span>
+                    <strong className="text-slate-300 font-mono">
+                      {formatISTDate(selectedThreat.captured_at || selectedThreat.timestamp || selectedThreat.date)}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Time / Timestamp:</span>
+                    <strong className="text-slate-300 font-mono">
+                      {formatISTTime(selectedThreat.captured_at || selectedThreat.timestamp || selectedThreat.time)}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between">
                     <span className="text-slate-400">Track ID:</span>
-                    <strong className="text-emerald-400">{selectedThreat.track_id}</strong>
+                    <strong className="text-cyan-400">{selectedThreat.track_id}</strong>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-400">Event Type:</span>
@@ -552,14 +585,6 @@ export const TacticalGISMap: React.FC = () => {
                   <div className="flex justify-between">
                     <span className="text-slate-400">Risk Score:</span>
                     <strong className="text-red-400 font-bold">{selectedThreat.risk_score} / 100</strong>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Date/Time:</span>
-                    <strong className="text-slate-300">{new Date(selectedThreat.captured_at).toLocaleString()}</strong>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Alert Status:</span>
-                    <strong className="text-emerald-400 uppercase">{selectedThreat.severity || 'ACTIVE'}</strong>
                   </div>
                 </div>
 

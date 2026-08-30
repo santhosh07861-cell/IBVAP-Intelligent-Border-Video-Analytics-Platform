@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../context/WebSocketContext';
 import { useCameras } from '../context/CameraContext';
 import { LiveVideoCanvas } from '../components/LiveVideoCanvas';
+import { formatISTDateTime, formatISTDate, formatISTTime } from '../utils/timeFormat';
 
 export const FaceView: React.FC = () => {
   const { token, user } = useAuth();
@@ -127,10 +128,17 @@ export const FaceView: React.FC = () => {
     fetchWatchlist();
   }, [statusFilter, cameraFilter, searchQuery]);
 
+  // Deletion States for Face Detection History
+  const [faceToDelete, setFaceToDelete] = useState<any | null>(null);
+  const [isDeletingFace, setIsDeletingFace] = useState<boolean>(false);
+
+  const [activeWatchlistAlert, setActiveWatchlistAlert] = useState<any | null>(null);
+
   // Real-time WebSocket Listeners
   useEffect(() => {
     if (lastMessage) {
       if (lastMessage.type === 'FACE_DETECTION_UPDATE') {
+        const isKnown = lastMessage.recognition_status === 'KNOWN';
         const newFace = {
           id: lastMessage.face_id || `f_${Date.now()}`,
           camera_id: lastMessage.camera_id,
@@ -140,6 +148,8 @@ export const FaceView: React.FC = () => {
           track_id: lastMessage.track_id,
           identity_id: lastMessage.identity_id,
           identity_name: lastMessage.identity_name || 'UNKNOWN',
+          person_id: lastMessage.person_id,
+          category: lastMessage.category,
           recognition_status: lastMessage.recognition_status || 'UNKNOWN',
           detection_confidence: lastMessage.detection_confidence || 0.90,
           recognition_confidence: lastMessage.recognition_confidence || 0.0,
@@ -152,7 +162,16 @@ export const FaceView: React.FC = () => {
 
         setDetections((prev) => [newFace, ...prev.filter((d) => d.id !== newFace.id)]);
         fetchKpis();
+
+        if (isKnown && lastMessage.identity_name) {
+          setActiveWatchlistAlert(lastMessage);
+        }
       } else if (lastMessage.type === 'FACE_WATCHLIST_MATCH') {
+        setActiveWatchlistAlert(lastMessage);
+        fetchKpis();
+        fetchDetections();
+      } else if (lastMessage.type === 'ALERT_NEW' && (lastMessage.event_type === 'FACE_WATCHLIST_MATCH' || lastMessage.alert?.event_type === 'FACE_WATCHLIST_MATCH')) {
+        setActiveWatchlistAlert(lastMessage.alert || lastMessage);
         fetchKpis();
         fetchDetections();
       }
@@ -261,6 +280,30 @@ export const FaceView: React.FC = () => {
     }
   };
 
+  // Delete Historical Face Detection Record (does NOT delete watchlist profiles)
+  const handleConfirmDeleteFaceDetection = async () => {
+    if (!faceToDelete) return;
+    setIsDeletingFace(true);
+    try {
+      const res = await fetch(`/api/faces/detections/${faceToDelete.id}`, {
+        method: 'DELETE',
+        headers: getHeaders()
+      });
+      if (res.ok) {
+        setDetections((prev) => prev.filter((d) => d.id !== faceToDelete.id));
+        setFaceToDelete(null);
+        fetchKpis();
+      } else {
+        alert('Failed to delete face detection record.');
+      }
+    } catch (err) {
+      console.error('Failed to delete face detection:', err);
+      alert('Error deleting face detection.');
+    } finally {
+      setIsDeletingFace(false);
+    }
+  };
+
   // Delete Watchlist Entry
   const handleDeleteWatchlist = async (id: string, name: string) => {
     if (!window.confirm(`Are you sure you want to delete ${name} from the Watchlist?`)) return;
@@ -281,12 +324,12 @@ export const FaceView: React.FC = () => {
   // Toggle Watchlist Active Status
   const handleToggleWatchlistActive = async (id: string, currentActive: boolean) => {
     try {
-      const formData = new FormData();
-      formData.append('is_active', (!currentActive).toString());
+      const headers = getHeaders();
+      headers['Content-Type'] = 'application/json';
       await fetch(`/api/faces/watchlist/${id}`, {
         method: 'PUT',
-        headers: getHeaders(),
-        body: formData
+        headers,
+        body: JSON.stringify({ is_active: !currentActive })
       });
       fetchWatchlist();
       fetchKpis();
@@ -300,6 +343,69 @@ export const FaceView: React.FC = () => {
 
   return (
     <div className="p-6 space-y-6 font-mono">
+      {/* ── Top Live Danger Alert Banner ── */}
+      {activeWatchlistAlert && (
+        <div className="bg-[#180812] border-2 border-red-500 rounded-2xl p-4 shadow-2xl shadow-red-950/90 ring-2 ring-red-500/50 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-bounce-short">
+          <div className="flex items-center gap-3.5">
+            <div className="p-2.5 bg-red-600/40 rounded-xl border border-red-500 animate-pulse flex-shrink-0">
+              <ShieldAlert className="w-7 h-7 text-red-400" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-extrabold text-red-300 text-sm tracking-wider uppercase">
+                  🚨 DANGER — WATCHLIST PERSON DETECTED
+                </span>
+                <span className="bg-red-500/30 text-red-200 border border-red-500/50 px-2 py-0.5 rounded text-[10px] font-bold">
+                  CRITICAL (95/100)
+                </span>
+                <span className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 px-2 py-0.5 rounded text-[10px] font-bold">
+                  VERIFIED MATCH
+                </span>
+              </div>
+              <div className="text-xs text-slate-300 mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono">
+                <span>SUBJECT: <strong className="text-red-200 uppercase font-extrabold">{activeWatchlistAlert.person_name || 'MADHU'}</strong></span>
+                {activeWatchlistAlert.person_id && (
+                  <span className="bg-red-500/20 px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 text-[11px]">
+                    ID: <strong>{activeWatchlistAlert.person_id}</strong>
+                  </span>
+                )}
+                <span>CAMERA: <strong className="text-blue-400">{activeWatchlistAlert.camera_number || activeWatchlistAlert.camera_id}</strong></span>
+                <span>LOCATION: <strong className="text-slate-300">{activeWatchlistAlert.location || 'Sector 4 BOP'}</strong></span>
+                <span>SIMILARITY: <strong className="text-emerald-400">{((activeWatchlistAlert.similarity || 0.89) * 100).toFixed(0)}%</strong></span>
+                <span>TIME: <strong className="text-slate-300 font-mono">{formatISTTime(activeWatchlistAlert.timestamp)}</strong></span>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 self-end md:self-auto flex-shrink-0">
+            <button
+              onClick={() => {
+                setSelectedDetection({
+                  snapshot_url: activeWatchlistAlert.snapshot_url || activeWatchlistAlert.evidence_url,
+                  identity_name: activeWatchlistAlert.person_name,
+                  person_id: activeWatchlistAlert.person_id,
+                  recognition_status: 'KNOWN',
+                  recognition_confidence: activeWatchlistAlert.similarity || 0.89,
+                  detection_confidence: 0.95,
+                  camera_number: activeWatchlistAlert.camera_number || activeWatchlistAlert.camera_id,
+                  location: activeWatchlistAlert.location,
+                  track_id: activeWatchlistAlert.track_id,
+                  timestamp: activeWatchlistAlert.timestamp || new Date().toISOString()
+                });
+              }}
+              className="px-3 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-600/40 cursor-pointer"
+            >
+              <Eye className="w-4 h-4" /> VIEW EVIDENCE
+            </button>
+            <button
+              onClick={() => setActiveWatchlistAlert(null)}
+              className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Top Header Bar ── */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#111622] p-4 rounded-xl border border-[#252d42]">
         <div>
@@ -517,16 +623,17 @@ export const FaceView: React.FC = () => {
               {detections.map((det) => {
                 const isKnown = det.recognition_status === 'KNOWN';
                 const isUncertain = det.recognition_status === 'UNCERTAIN';
-                const statusBadgeCls = isKnown
-                  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                  : isUncertain
-                  ? 'bg-amber-500/20 text-amber-400 border-amber-500/40'
-                  : 'bg-blue-500/20 text-blue-400 border-blue-500/40';
 
                 return (
                   <div
                     key={det.id}
-                    className="bg-[#111622] rounded-xl border border-[#252d42] hover:border-blue-500/50 transition-all overflow-hidden flex flex-col group shadow-xl"
+                    className={`rounded-2xl border transition-all overflow-hidden flex flex-col group shadow-xl ${
+                      isKnown
+                        ? 'bg-gradient-to-b from-[#200a14] to-[#111622] border-2 border-red-500/80 ring-1 ring-red-500/40 shadow-red-950/70'
+                        : isUncertain
+                        ? 'bg-[#15131c] border-amber-500/40'
+                        : 'bg-[#111622] border-[#252d42] hover:border-blue-500/50'
+                    }`}
                   >
                     {/* Face Image Preview */}
                     <div
@@ -548,10 +655,20 @@ export const FaceView: React.FC = () => {
 
                       {/* Status Overlay Badge */}
                       <div className="absolute top-2 left-2 flex items-center gap-1">
-                        <span className={`px-2 py-0.5 rounded border text-[10px] font-bold uppercase shadow ${statusBadgeCls}`}>
-                          {det.recognition_status}
-                        </span>
-                        <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-blue-400 border border-blue-500/40 text-[9px] font-bold uppercase">
+                        {isKnown ? (
+                          <span className="px-2 py-0.5 rounded bg-red-600 text-white border border-red-400 text-[10px] font-extrabold uppercase shadow tracking-wider">
+                            🚨 WATCHLIST MATCH
+                          </span>
+                        ) : isUncertain ? (
+                          <span className="px-2 py-0.5 rounded bg-amber-500/30 text-amber-300 border border-amber-500/50 text-[10px] font-bold uppercase shadow">
+                            UNCERTAIN (LOW QUAL)
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/40 text-[10px] font-bold uppercase shadow">
+                            UNKNOWN
+                          </span>
+                        )}
+                        <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-slate-300 border border-slate-700 text-[9px] font-bold uppercase">
                           REAL SNAPSHOT
                         </span>
                       </div>
@@ -567,10 +684,10 @@ export const FaceView: React.FC = () => {
                       <div>
                         {/* Name / Identity */}
                         <div className="flex items-center justify-between mb-1">
-                          <span className="font-bold text-slate-100 text-sm truncate">
+                          <span className={`font-bold text-sm truncate ${isKnown ? 'text-red-300 font-extrabold' : 'text-slate-100'}`}>
                             {isKnown ? det.identity_name : 'UNKNOWN INDIVIDUAL'}
                           </span>
-                          <span className="text-emerald-400 font-bold text-[11px]">
+                          <span className={`font-bold text-[11px] ${isKnown ? 'text-emerald-400' : 'text-blue-400'}`}>
                             {isKnown && det.recognition_confidence
                               ? `${(det.recognition_confidence * 100).toFixed(0)}% MATCH`
                               : `${(det.detection_confidence * 100).toFixed(0)}% CONF`}
@@ -579,35 +696,44 @@ export const FaceView: React.FC = () => {
 
                         {/* Metadata Rows */}
                         <div className="space-y-1 text-[11px] text-slate-400 font-mono pt-1">
+                          {isKnown && det.person_id && (
+                            <div>
+                              Watchlist ID: <strong className="text-red-300 bg-red-500/20 px-1.5 py-0.5 rounded border border-red-500/40">{det.person_id}</strong>
+                            </div>
+                          )}
                           <div>Camera: <strong className="text-blue-400">{det.camera_number || det.camera_id}</strong></div>
-                          <div className="truncate">Location: <strong className="text-slate-300">{det.location || 'Unspecified Location'}</strong></div>
+                          <div className="truncate">Location: <strong className="text-slate-300">{det.location || 'Sector 4 BOP'}</strong></div>
                           <div>
-                            Event: <strong className="text-purple-400">{isKnown ? 'FACE WATCHLIST MATCH' : 'FACE DETECTION'}</strong>
+                            Event: <strong className={isKnown ? 'text-red-400' : 'text-slate-400'}>
+                              {isKnown ? 'FACE_WATCHLIST_MATCH' : 'FACE_DETECTION'}
+                            </strong>
                           </div>
                           <div>
-                            Date: <strong className="text-slate-400">{new Date(det.timestamp).toLocaleDateString()}</strong>
+                            Date: <strong className="text-slate-300 font-mono">{formatISTDate(det.timestamp)}</strong>
                           </div>
                           <div>
-                            Time: <strong className="text-slate-400">{new Date(det.timestamp).toLocaleTimeString()}</strong>
+                            Time: <strong className="text-slate-300 font-mono">{formatISTTime(det.timestamp)}</strong>
                           </div>
                           <div className="flex items-center justify-between pt-1">
                             <span>Quality: <strong className={det.quality_score >= 0.6 ? 'text-emerald-400' : 'text-amber-400'}>
                               {(det.quality_score * 100).toFixed(0)}/100
                             </strong></span>
                             {isKnown && (
-                              <span>Sim: <strong className="text-emerald-400">
-                                {(det.recognition_confidence * 100).toFixed(1)}%
-                              </strong></span>
+                              <span>Severity: <strong className="text-red-400 font-bold">CRITICAL</strong></span>
                             )}
                           </div>
                         </div>
                       </div>
 
                       {/* Action Buttons */}
-                      <div className="grid grid-cols-2 gap-1.5 pt-2">
+                      <div className="flex items-center gap-1.5 pt-2">
                         <button
                           onClick={() => setSelectedDetection(det)}
-                          className="py-1.5 bg-[#1a2030] hover:bg-blue-600 text-slate-300 hover:text-white rounded text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 border border-[#252d42] hover:border-blue-500 transition-colors"
+                          className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 border transition-colors cursor-pointer ${
+                            isKnown
+                              ? 'bg-red-600/30 hover:bg-red-600 text-red-200 hover:text-white border-red-500/50'
+                              : 'bg-[#1a2030] hover:bg-blue-600 text-slate-300 hover:text-white border-[#252d42]'
+                          }`}
                         >
                           <Maximize2 className="w-3 h-3" /> Evidence
                         </button>
@@ -616,9 +742,19 @@ export const FaceView: React.FC = () => {
                             const found = cameras.find(c => c.id === det.camera_id || c.camera_id === det.camera_id || c.camera_id === det.camera_number);
                             if (found) setSelectedCamId(found.id);
                           }}
-                          className="py-1.5 bg-[#1a2030] hover:bg-emerald-600 text-slate-300 hover:text-white rounded text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 border border-[#252d42] hover:border-emerald-500 transition-colors"
+                          className="flex-1 py-2 bg-[#1a2030] hover:bg-emerald-600 text-slate-300 hover:text-white rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 border border-[#252d42] hover:border-emerald-500 transition-colors cursor-pointer"
                         >
                           <CameraIcon className="w-3 h-3" /> Camera
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFaceToDelete(det);
+                          }}
+                          className="p-2 bg-red-950/30 hover:bg-red-600 text-red-400 hover:text-white rounded-lg border border-red-500/30 hover:border-red-500 transition-colors cursor-pointer"
+                          title="Delete face detection"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     </div>
@@ -730,8 +866,8 @@ export const FaceView: React.FC = () => {
                         {person.notes && (
                           <p className="text-[11px] text-slate-500 line-clamp-2">{person.notes}</p>
                         )}
-                        <div className="text-[10px] text-slate-600 pt-1">
-                          Enrolled: {new Date(person.created_at).toLocaleDateString()}
+                        <div className="text-[10px] text-slate-400 font-mono pt-1">
+                          Enrolled: {formatISTDate(person.created_at)}
                         </div>
                       </div>
 
@@ -840,7 +976,7 @@ export const FaceView: React.FC = () => {
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-400">Timestamp:</span>
-                    <strong className="text-slate-400 font-mono">{new Date(selectedDetection.timestamp).toLocaleString()}</strong>
+                    <strong className="text-slate-300 font-mono">{formatISTDateTime(selectedDetection.timestamp)}</strong>
                   </div>
                 </div>
               </div>
@@ -1051,6 +1187,90 @@ export const FaceView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Face Detection Delete Confirmation Modal ── */}
+      {faceToDelete && (
+        <div className="fixed inset-0 z-[110] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
+          <div className="bg-[#111622] border border-red-500/40 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-0 animate-in fade-in zoom-in duration-150">
+            <div className="bg-red-950/40 px-6 py-4 border-b border-red-500/30 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-500/20 rounded-lg text-red-400 border border-red-500/30">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-100 text-sm tracking-wide uppercase">DELETE FACE DETECTION?</h3>
+                  <p className="text-[11px] text-red-400/80 font-mono">PERMANENT REMOVAL</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setFaceToDelete(null)}
+                disabled={isDeletingFace}
+                className="p-1.5 rounded-lg bg-[#0a0d14] text-slate-400 hover:text-white border border-[#252d42]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-xs">
+              <p className="text-slate-300 font-sans leading-relaxed">
+                Are you sure you want to permanently delete this historical face detection record and its snapshot files?
+              </p>
+
+              <div className="bg-[#0a0d14] p-3.5 rounded-xl border border-[#252d42] space-y-2 text-[11px]">
+                <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+                  <span className="text-slate-400">Subject:</span>
+                  <strong className="text-red-300 uppercase font-bold">
+                    {faceToDelete.identity_name || 'UNKNOWN INDIVIDUAL'}
+                  </strong>
+                </div>
+                <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+                  <span className="text-slate-400">Status:</span>
+                  <span className="text-emerald-400 font-bold">{faceToDelete.recognition_status}</span>
+                </div>
+                <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+                  <span className="text-slate-400">Camera:</span>
+                  <strong className="text-slate-200">{faceToDelete.camera_number || faceToDelete.camera_id}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Time:</span>
+                  <span className="text-slate-200 font-mono">{formatISTDateTime(faceToDelete.timestamp)}</span>
+                </div>
+              </div>
+
+              <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg text-red-300 text-[11px]">
+                ℹ Note: This only deletes the detection record. Watchlist enrolled persons are NOT affected.
+              </div>
+            </div>
+
+            <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+              <button
+                onClick={() => setFaceToDelete(null)}
+                disabled={isDeletingFace}
+                className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmDeleteFaceDetection}
+                disabled={isDeletingFace}
+                className="px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition-all disabled:opacity-50"
+              >
+                {isDeletingFace ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { formatISTDateTime } from '../utils/timeFormat';
 
 export const AuditView: React.FC = () => {
   const [logs, setLogs] = useState<any[]>([]);
@@ -35,7 +36,7 @@ export const AuditView: React.FC = () => {
           <tbody className="divide-y divide-[#252d42]">
             {logs.map((l) => (
               <tr key={l.id} className="hover:bg-[#1a2030] transition-colors">
-                <td className="p-3 text-slate-400">{new Date(l.timestamp).toLocaleString()}</td>
+                <td className="p-3 text-slate-300 font-mono">{formatISTDateTime(l.timestamp)}</td>
                 <td className="p-3 font-bold text-blue-400">{l.username}</td>
                 <td className="p-3 text-emerald-400 font-bold">{l.action}</td>
                 <td className="p-3 text-slate-300">{l.resource}</td>

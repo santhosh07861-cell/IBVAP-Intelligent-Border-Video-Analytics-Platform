@@ -113,6 +113,9 @@ class Detection(Base):
     bbox = Column(JSON, nullable=False)  # [x, y, w, h] normalized
     track_id = Column(Integer, nullable=True, index=True)
     is_fallback = Column(Boolean, default=False)
+    location = Column(String(200), nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
 
 class Track(Base):
     __tablename__ = "tracks"
@@ -173,16 +176,52 @@ class Alert(Base):
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
 class ANPRResult(Base):
+    """
+    Stores a single confirmed ANPR detection event.
+    Each record represents one confirmed plate reading from a specific vehicle track.
+    Deduplication (ANPR_DUPLICATE_COOLDOWN_SEC) prevents multiple records for one stationary vehicle.
+    """
     __tablename__ = "anpr_results"
     id = Column(String, primary_key=True, default=generate_uuid)
     camera_id = Column(String, ForeignKey("cameras.id"), index=True)
-    plate_text = Column(String(30), nullable=False, index=True)
-    plate_confidence = Column(Float, default=0.90)
-    ocr_confidence = Column(Float, default=0.88)
-    vehicle_type = Column(String(30), default="car")
-    crop_url = Column(String(500))
-    full_frame_url = Column(String(500))
+    # plate_number: Normalized OCR output (uppercase, spaces removed).
+    # Value is 'PLATE UNCERTAIN' when OCR confidence is below threshold.
+    plate_number = Column(String(30), nullable=False, index=True)
+    vehicle_type = Column(String(30), default="UNKNOWN")  # car, truck, bus, motorcycle, bicycle, van, unknown
+    vehicle_track_id = Column(Integer, nullable=True, index=True)  # Track ID from MultiObjectTracker
+    camera_name = Column(String(200), nullable=True)
+    camera_location = Column(String(500), nullable=True)
+    detection_confidence = Column(Float, default=0.0)   # YOLO vehicle detection confidence
+    ocr_confidence = Column(Float, default=0.0)          # EasyOCR mean confidence for this reading
+    plate_bbox = Column(JSON, nullable=True)              # [x, y, w, h] normalized within vehicle crop
+    vehicle_bbox = Column(JSON, nullable=True)            # [x, y, w, h] normalized in full frame
+    snapshot_url = Column(String(500), nullable=True)     # URL to annotated evidence image
+    crop_url = Column(String(500), nullable=True)         # URL to plate crop image
+    status = Column(String(30), default="CONFIRMED")      # CONFIRMED, UNCERTAIN
+    is_watchlist_match = Column(Boolean, default=False)   # True if plate in ANPRWatchlist
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    camera = relationship("Camera", foreign_keys=[camera_id])
+
+class ANPRWatchlist(Base):
+    """
+    Vehicle plate watchlist / blacklist for security alerts.
+    When a confirmed ANPR reading matches an active entry here, a HIGH/CRITICAL
+    security alert is generated, a WebSocket ANPR_WATCHLIST_MATCH event fires,
+    and the alarm sound plays on the frontend.
+    """
+    __tablename__ = "anpr_watchlist"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    plate_number = Column(String(30), nullable=False, unique=True, index=True)
+    vehicle_type = Column(String(30), nullable=True)       # Optional: restrict to specific vehicle type
+    reason = Column(String(500), nullable=True)            # Why this plate is flagged
+    severity = Column(String(20), default="HIGH")          # HIGH or CRITICAL
+    is_active = Column(Boolean, default=True)
+    notes = Column(Text, nullable=True)
+    added_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class FaceWatchlist(Base):
     __tablename__ = "face_watchlist"

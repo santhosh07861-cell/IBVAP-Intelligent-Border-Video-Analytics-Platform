@@ -76,17 +76,7 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [refreshCameras]);
 
   const primaryCamera = cameras.find(c => c.role === 'primary') || (cameras.length > 0 ? cameras[0] : null);
-  const secondaryCameras = cameras.filter(c => c.id !== primaryCamera?.id);
-
-  // Automatically keep primary camera subscribed for Dashboard
-  useEffect(() => {
-    if (primaryCamera?.camera_id) {
-      fetch(`/api/cameras/${primaryCamera.camera_id}/subscribe`, {
-        method: 'POST',
-        headers: getHeaders()
-      }).catch(() => {});
-    }
-  }, [primaryCamera?.camera_id, getHeaders]);
+  const secondaryCameras = cameras.filter(c => c.id !== primaryCamera?.id && c.camera_id !== primaryCamera?.camera_id);
 
   const setPrimaryCamera = async (cameraId: string): Promise<boolean> => {
     try {
@@ -106,7 +96,7 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const startCameraStream = async (cameraId: string): Promise<boolean> => {
     try {
-      setCameras(prev => prev.map(c => c.camera_id === cameraId ? { ...c, status: 'CONNECTING' } : c));
+      setCameras(prev => prev.map(c => (c.camera_id === cameraId || c.id === cameraId) ? { ...c, status: 'CONNECTING' } : c));
       const res = await fetch(`/api/cameras/${cameraId}/start`, {
         method: 'POST',
         headers: getHeaders()
@@ -122,6 +112,7 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const stopCameraStream = async (cameraId: string): Promise<boolean> => {
     try {
+      setCameras(prev => prev.map(c => (c.camera_id === cameraId || c.id === cameraId) ? { ...c, status: 'STOPPED', fps: 0 } : c));
       const res = await fetch(`/api/cameras/${cameraId}/stop`, {
         method: 'POST',
         headers: getHeaders()
@@ -136,7 +127,7 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const subscribeCamera = async (cameraId: string, clientId: string = "ui_view"): Promise<string | null> => {
     try {
-      const res = await fetch(`/api/cameras/${cameraId}/subscribe`, {
+      const res = await fetch(`/api/cameras/${cameraId}/subscribe?client_id=${encodeURIComponent(clientId)}`, {
         method: 'POST',
         headers: getHeaders()
       });

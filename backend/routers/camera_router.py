@@ -6,10 +6,11 @@ import asyncio
 import cv2
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-# Force FFmpeg C++ socket layer to fail in 1.0s max instead of blocking for 30s
+# Force FFmpeg C++ socket layer to fail fast if stream hangs
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;1000000|stimeout;1000000|rw_timeout;1000000"
 
 from database.connection import get_db
@@ -60,14 +61,11 @@ class TestConnectionRequest(BaseModel):
 @router.get("", response_model=List[CameraResponse])
 async def list_cameras(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     cameras = db.query(Camera).all()
-
-    # Ensure exactly one Primary camera exists — only write if needed (avoids gratuitous commit on every poll)
     if cameras:
         has_primary = any(c.role == "primary" for c in cameras)
         if not has_primary:
             cameras[0].role = "primary"
             db.commit()
-
     return cameras
 
 @router.get("/{camera_id}", response_model=CameraResponse)
@@ -142,9 +140,9 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_
         object_type="all",
         direction="ANY",
         min_confidence=0.3,
-        loitering_threshold_sec=2,
+        loitering_threshold_sec=5,
         severity="HIGH",
-        cooldown_sec=5,
+        cooldown_sec=30,
         enabled=True
     )
     db.add(rule)
@@ -189,25 +187,8 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
                         "protocol": proto,
                         "stream_url": masked_url,
                         "latency_ms": 0.0,
-                        "message": f"Could not reach IP {host}:{port}. Ensure phone/camera is on the same Wi-Fi and IP Webcam server is running."
+                        "message": f"Could not reach IP {host}:{port}. Ensure camera is on the same network."
                     }
-        except Exception:
-            pass
-
-    # Fast HTTP header probe for http/https streams (fails fast in 0.8s if stream header hangs)
-    if url.startswith("http://") or url.startswith("https://"):
-        try:
-            import requests
-            resp = requests.get(url, stream=True, timeout=0.8)
-            resp.close()
-        except requests.exceptions.Timeout:
-            return {
-                "status": "FAILED",
-                "protocol": proto,
-                "stream_url": masked_url,
-                "latency_ms": 800.0,
-                "message": f"Stream server at {masked_url} did not respond with video stream data within 800ms. Check IP and Port."
-            }
         except Exception:
             pass
 
@@ -227,10 +208,10 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
         return ret, frame
 
     try:
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=1) as executor:
             fut = executor.submit(_attempt_open)
-            ret, frame = fut.result(timeout=1.0)
+            ret, frame = fut.result(timeout=1.5)
 
         latency = round((time.time() - start_t) * 1000, 1)
         if ret and frame is not None:
@@ -255,7 +236,7 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
             "protocol": proto,
             "stream_url": masked_url,
             "latency_ms": 1000.0,
-            "message": f"Stream connection timed out after 1.0s. Ensure phone camera server is active."
+            "message": f"Stream connection timed out or failed: {e}"
         }
 
 @router.post("/{camera_id}/start", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
@@ -267,7 +248,7 @@ def start_camera(camera_id: str, db: Session = Depends(get_db), current_user = D
     from backend.main import manager as ws_manager
     from backend.stream_manager import stream_manager
 
-    # Fast TCP pre-check for RTSP/HTTP stream sources (supports IPv4 & IPv6)
+    # Fast TCP pre-check for RTSP/HTTP stream sources
     url = cam.stream_url.strip()
     if url.startswith("http://") or url.startswith("https://") or url.startswith("rtsp://"):
         try:
@@ -278,7 +259,7 @@ def start_camera(camera_id: str, db: Session = Depends(get_db), current_user = D
             if host:
                 af = socket.AF_INET6 if ":" in host else socket.AF_INET
                 s = socket.socket(af, socket.SOCK_STREAM)
-                s.settimeout(0.5)
+                s.settimeout(0.6)
                 res = s.connect_ex((host, port))
                 s.close()
                 if res != 0:
@@ -287,31 +268,14 @@ def start_camera(camera_id: str, db: Session = Depends(get_db), current_user = D
                     db.commit()
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Cannot connect to {host}:{port}. Ensure your Mac and Phone are on the SAME Wi-Fi network and app server is started."
+                        detail=f"Cannot connect to stream host {host}:{port}. Check network connectivity and port."
                     )
         except HTTPException:
             raise
         except Exception:
             pass
 
-    # Fast HTTP header probe for http/https streams (fails fast in 0.8s if stream header hangs)
-    if url.startswith("http://") or url.startswith("https://"):
-        try:
-            import requests
-            resp = requests.get(url, stream=True, timeout=0.8)
-            resp.close()
-        except requests.exceptions.Timeout:
-            cam.status = "ERROR"
-            if cam.health: cam.health.status = "ERROR"
-            db.commit()
-            raise HTTPException(
-                status_code=400,
-                detail=f"Stream server at {url} did not respond with video stream data within 800ms. Check IP, Port, and Path."
-            )
-        except Exception:
-            pass
-
-    # Force reset stream worker if existing worker is stopped or in error state
+    # Stop existing worker for this camera if any
     stream_manager.stop_stream(cam.camera_id)
 
     cam.status = "CONNECTING"
@@ -363,7 +327,6 @@ def set_primary_camera(camera_id: str, db: Session = Depends(get_db), current_us
     if not target:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    # Demote all existing cameras to secondary
     db.query(Camera).update({Camera.role: "secondary"})
     target.role = "primary"
     db.commit()
@@ -384,7 +347,16 @@ def delete_camera(camera_id: str, db: Session = Depends(get_db), current_user = 
 
     from backend.stream_manager import stream_manager
     stream_manager.stop_stream(cam.camera_id)
+    stream_manager.stop_stream(cam.id)
 
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="DELETE_CAMERA",
+        resource="cameras",
+        details={"camera_id": cam.camera_id, "name": cam.name, "location": cam.location}
+    )
+    db.add(audit)
     db.delete(cam)
     db.commit()
 
@@ -414,26 +386,29 @@ def unsubscribe_camera(camera_id: str, subscription_id: str):
         "active_subscribers": stream_manager.get_subscriber_count(camera_id)
     }
 
-from fastapi.responses import StreamingResponse
-
 @router.get("/{camera_id}/stream")
-async def get_camera_stream(camera_id: str):
+async def get_camera_stream(camera_id: str, db: Session = Depends(get_db)):
     """
-    Streams real-time MJPEG video frames from active StreamWorker with automatic subscription lifecycle tracking.
-    Uses async frame_generator to prevent blocking Starlette's worker threadpool.
+    Streams real-time MJPEG video frames from active StreamWorker with automatic startup & subscription.
     """
     from backend.main import manager as ws_manager
     from backend.stream_manager import stream_manager
-    cid = camera_id
+
+    # Resolve canonical camera ID
+    cam = db.query(Camera).filter((Camera.id == camera_id) | (Camera.camera_id == camera_id)).first()
+    canonical_id = cam.camera_id if cam else camera_id
     sub_id = f"mjpeg_stream_{uuid.uuid4().hex[:6]}"
 
-    # Automatically subscribe on connection
-    stream_manager.subscribe(cid, sub_id, ws_manager)
+    # Automatically ensure stream worker is started if camera exists in DB and is not stopped
+    if cam and cam.status != "STOPPED":
+        stream_manager.start_stream(canonical_id, cam.protocol, cam.stream_url, ws_manager)
+
+    stream_manager.subscribe(canonical_id, sub_id, ws_manager)
 
     async def frame_generator():
         try:
             while True:
-                worker = stream_manager.workers.get(cid)
+                worker = stream_manager.get_worker(canonical_id)
                 if worker and worker.is_running:
                     jpeg_bytes = worker.get_latest_jpeg()
                     if jpeg_bytes:
@@ -441,8 +416,6 @@ async def get_camera_stream(camera_id: str):
                                b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
                 await asyncio.sleep(0.04)
         finally:
-            # Automatically unsubscribe when HTTP stream connection drops
-            stream_manager.unsubscribe(cid, sub_id)
+            stream_manager.unsubscribe(canonical_id, sub_id)
 
     return StreamingResponse(frame_generator(), media_type="multipart/x-mixed-replace; boundary=frame")
-

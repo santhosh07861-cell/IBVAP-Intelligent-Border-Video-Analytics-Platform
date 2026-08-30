@@ -68,9 +68,19 @@ storage/evidence/snapshots/*
 storage/evidence/face/snapshots/*
 storage/evidence/face/crops/*
 storage/evidence/face/watchlist/*
+storage/evidence/anpr/*
+storage/evidence/detections/*
 storage/test_face_subject.jpg
 !storage/uploads/.gitkeep
 !storage/evidence/snapshots/.gitkeep
 !storage/evidence/face/snapshots/.gitkeep
 !storage/evidence/face/crops/.gitkeep
 !storage/evidence/face/watchlist/.gitkeep
+!storage/evidence/anpr/.gitkeep
+!storage/evidence/detections/.gitkeep
+
+# Agent brain / conversation artifacts
+brain/
+
+# One-off test files
+test_persistence_lifecycle.py
