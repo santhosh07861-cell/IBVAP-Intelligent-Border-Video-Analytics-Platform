@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database.connection import get_db
-from database.schema import Incident, IncidentNote, Evidence, AuditLog
+from database.schema import Incident, IncidentNote, Evidence, AuditLog, Camera
 from backend.auth import get_current_user, RequireRole
 
 router = APIRouter(prefix="/api/incidents", tags=["Incident Management"])

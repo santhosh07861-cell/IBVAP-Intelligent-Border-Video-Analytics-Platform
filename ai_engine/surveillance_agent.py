@@ -16,7 +16,8 @@ from ai_engine.anpr.anpr_engine import ANPREngine, save_anpr_evidence_snapshot
 from event_engine.risk.scorer import OperationalRiskScorer
 from storage.evidence_manager import EvidenceManager
 from database.connection import SessionLocal
-from database.schema import Camera, CameraZone, ZoneRule, Event, Alert, Incident, Evidence, FaceDetection, FaceWatchlist, ANPRResult, ANPRWatchlist, Detection
+from database.schema import Camera, CameraZone, ZoneRule, Event, Alert, Incident, Evidence, FaceDetection, FaceWatchlist, ANPRResult, ANPRWatchlist, Detection, AuditBlock
+from backend.blockchain_audit import create_audit_block
 
 from backend.config import (
     DETECTION_CONFIDENCE_THRESHOLD, LOITERING_THRESHOLD_SEC, ALERT_COOLDOWN_SEC, EVIDENCE_CAPTURE_INTERVAL_SEC,
@@ -338,13 +339,24 @@ class AISurveillanceAgent:
                         al_threat = Alert(
                             id=str(uuid.uuid4()),
                             camera_id=cam_id,
+                            event_id=ev_threat.id,
                             event_type="FACE_WATCHLIST_MATCH",
                             severity="CRITICAL",
                             risk_score=95.0,
                             confidence=track.recognition_confidence,
                             status="NEW",
                             evidence_url=snap_url,
-                            timestamp=now_dt
+                            timestamp=now_dt,
+                            track_id=track.track_id,
+                            location=cam_loc,
+                            details={
+                                "person_name": track.identity_name,
+                                "person_id": p_badge,
+                                "category": p_cat,
+                                "camera_name": cam_name,
+                                "location": cam_loc,
+                                "timestamp": ts_str,
+                            }
                         )
                         db.add(al_threat)
 
@@ -353,6 +365,7 @@ class AISurveillanceAgent:
                             id=str(uuid.uuid4()),
                             incident_number=inc_num,
                             camera_id=cam_id,
+                            alert_id=al_threat.id,
                             title=f"CRITICAL WATCHLIST THREAT — {track.identity_name.upper()}",
                             description=f"Watchlist subject '{track.identity_name}' (ID: {p_badge}, Category: {p_cat}) detected at {cam_name} with {int(track.recognition_confidence * 100)}% match similarity.",
                             severity="CRITICAL",
@@ -584,13 +597,22 @@ class AISurveillanceAgent:
                         al_unknown = Alert(
                             id=str(uuid.uuid4()),
                             camera_id=cam_id,
+                            event_id=ev_unknown.id,
                             event_type="UNKNOWN_PERSON_DETECTED",
                             severity="HIGH",
                             risk_score=75.0,
                             confidence=track.confidence,
                             status="NEW",
                             evidence_url=snap_url,
-                            timestamp=now_dt
+                            timestamp=now_dt,
+                            track_id=track.track_id,
+                            location=cam_loc,
+                            details={
+                                "track_id": f"F-{track.track_id}",
+                                "camera_name": cam_name,
+                                "location": cam_loc,
+                                "timestamp": ts_str,
+                            }
                         )
                         db.add(al_unknown)
 
@@ -599,6 +621,7 @@ class AISurveillanceAgent:
                             id=str(uuid.uuid4()),
                             incident_number=inc_num_unk,
                             camera_id=cam_id,
+                            alert_id=al_unknown.id,
                             title=f"HIGH UNKNOWN PERSON DETECTED — {cam_name}",
                             description=f"Unrecognized subject (Track #F-{track.track_id}) detected at {cam_name}. Operator identity verification required.",
                             severity="HIGH",
@@ -922,6 +945,7 @@ class AISurveillanceAgent:
                     al = Alert(
                         id=str(uuid.uuid4()),
                         camera_id=cam_id,
+                        event_id=ev.id,
                         event_type="ANPR_WATCHLIST_MATCH",
                         severity=severity,
                         risk_score=risk_score,
@@ -929,6 +953,17 @@ class AISurveillanceAgent:
                         status="NEW",
                         evidence_url=snap_url,
                         timestamp=now_dt,
+                        track_id=obj.track_id,
+                        location=cam_loc,
+                        details={
+                            "plate_number": plate_text,
+                            "vehicle_type": vehicle_type,
+                            "track_id": f"V-{obj.track_id}",
+                            "reason": watchlist_entry.reason or "Vehicle on security watchlist",
+                            "camera_name": cam_name,
+                            "location": cam_loc,
+                            "timestamp": ts_str,
+                        }
                     )
                     db.add(al)
 
@@ -937,6 +972,7 @@ class AISurveillanceAgent:
                         id=str(uuid.uuid4()),
                         incident_number=inc_num,
                         camera_id=cam_id,
+                        alert_id=al.id,
                         title=f"{severity} WATCHLIST VEHICLE — {plate_text}",
                         description=f"Blacklisted vehicle with license plate '{plate_text}' ({vehicle_type}) detected at {cam_name}. Reason: {watchlist_entry.reason or 'Security Watchlist'}",
                         severity=severity,
@@ -1378,22 +1414,40 @@ class AISurveillanceAgent:
         al = Alert(
             id=str(uuid.uuid4()),
             camera_id=cam.id,
+            event_id=ev.id,          # Direct FK — no timestamp matching needed
             event_type=event_type,
             severity=severity,
             risk_score=risk_score,
             confidence=obj.confidence,
             status="NEW",
-            timestamp=now_dt
+            timestamp=now_dt,
+            # Denormalized for fast REST retrieval without JOIN
+            track_id=obj.track_id,
+            zone_id=zone_id,
+            zone_name=zone_name,
+            location=cam.location or "Border Perimeter",
+            details={
+                "track_id": obj.track_id,
+                "class_name": obj.class_name,
+                "zone_id": zone_id,
+                "zone_name": zone_name,
+                "location": cam.location or "Border Perimeter",
+                "camera_name": cam.name,
+                "camera_number": cam.camera_id,
+                "timestamp": ts_str,
+            }
         )
         db.add(al)
 
         inc_id = None
+        inc = None  # Always initialize — prevents UnboundLocalError when risk_score < 70
         if risk_score >= 70.0:
             inc_num = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
             inc = Incident(
                 id=str(uuid.uuid4()),
                 incident_number=inc_num,
                 camera_id=cam.id,
+                alert_id=al.id,      # Direct alert→incident link
                 title=f"{severity} {event_type} in {zone_name}",
                 description=f"Track #{obj.track_id} ({obj.class_name}) triggered {event_type} in {zone_name} ({cam.name})",
                 severity=severity,
@@ -1500,6 +1554,63 @@ class AISurveillanceAgent:
         logger.info(f"[ALERT_CREATED] camera={cam.camera_id} alert_id={al.id} event_id={ev.id} severity={severity}")
         if inc_id:
             logger.info(f"[INCIDENT_CREATED] camera={cam.camera_id} incident_id={inc_id} alert_id={al.id}")
+
+        # ── Blockchain Audit Trail ──────────────────────────────────────────────
+        # Append a tamper-evident block for the alert (and incident if created).
+        # Uses a separate DB session so a blockchain failure never disrupts the
+        # main surveillance pipeline.
+        try:
+            from database.connection import SessionLocal as BlockchainSession
+            bc_db = BlockchainSession()
+            try:
+                alert_block_data = {
+                    "alert_id": al.id,
+                    "event_id": ev.id,
+                    "camera_id": cam.id,
+                    "camera_number": cam.camera_id,
+                    "event_type": event_type,
+                    "severity": severity,
+                    "risk_score": float(risk_score),
+                    "track_id": obj.track_id,
+                    "zone_id": zone_id,
+                    "zone_name": zone_name,
+                    "timestamp": ts_str,
+                }
+                create_audit_block(
+                    bc_db,
+                    event_type="ALERT_CREATED",
+                    event_id=al.id,
+                    event_data=alert_block_data,
+                    camera_id=cam.id,
+                )
+                if inc_id and inc:
+                    inc_block_data = {
+                        "incident_id": inc.id,
+                        "incident_number": inc.incident_number,
+                        "alert_id": al.id,
+                        "event_id": ev.id,
+                        "camera_id": cam.id,
+                        "event_type": event_type,
+                        "severity": severity,
+                        "risk_score": float(risk_score),
+                        "timestamp": ts_str,
+                    }
+                    create_audit_block(
+                        bc_db,
+                        event_type="INCIDENT_CREATED",
+                        event_id=inc.id,
+                        event_data=inc_block_data,
+                        camera_id=cam.id,
+                    )
+                bc_db.commit()
+            except Exception as bc_ex:
+                logger.error(f"[BLOCKCHAIN_AUDIT_ERROR] {bc_ex}")
+                try: bc_db.rollback()
+                except Exception: pass
+            finally:
+                bc_db.close()
+        except Exception as bc_import_ex:
+            logger.error(f"[BLOCKCHAIN_IMPORT_ERROR] {bc_import_ex}")
 
         # Broadcast ALERT_NEW (triggers alarm sound & updates live dashboard)
         alert_title = f"🚨 {event_type.replace('_', ' ')} — {zone_name} ({cam.name})"

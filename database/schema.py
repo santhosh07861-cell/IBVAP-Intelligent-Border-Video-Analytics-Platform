@@ -146,6 +146,9 @@ class Incident(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     incident_number = Column(String(50), unique=True, nullable=False)
     camera_id = Column(String, ForeignKey("cameras.id"))
+    # alert_id: Direct FK to the Alert record that created this incident.
+    # Enables deterministic alert→incident correlation by ID (not timestamp).
+    alert_id = Column(String, ForeignKey("alerts.id"), nullable=True, index=True)
     title = Column(String(200), nullable=False)
     description = Column(Text)
     severity = Column(String(20), default="HIGH")  # INFO, LOW, MEDIUM, HIGH, CRITICAL
@@ -167,6 +170,9 @@ class Alert(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     incident_id = Column(String, ForeignKey("incidents.id"), nullable=True)
     camera_id = Column(String, ForeignKey("cameras.id"), index=True)
+    # event_id: Direct FK to the Event that triggered this alert.
+    # Enables precise Alert→Event lookup without fragile timestamp matching.
+    event_id = Column(String, ForeignKey("events.id"), nullable=True, index=True)
     event_type = Column(String(100), nullable=False)
     severity = Column(String(20), default="HIGH", index=True)
     risk_score = Column(Float, default=70.0)
@@ -174,6 +180,13 @@ class Alert(Base):
     status = Column(String(30), default="NEW", index=True)
     evidence_url = Column(String(500), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    # Denormalized correlation fields — stored on Alert for fast REST retrieval
+    # without requiring a JOIN to events table on every alert list request.
+    track_id = Column(Integer, nullable=True, index=True)    # Track that triggered the alert
+    zone_id = Column(String, nullable=True)                  # Zone that was violated
+    zone_name = Column(String(200), nullable=True)           # Display name of zone
+    location = Column(String(500), nullable=True)            # Camera location at event time
+    details = Column(JSON, default=dict)                     # Event metadata (person_name, etc.)
 
 class ANPRResult(Base):
     """
@@ -310,6 +323,41 @@ class AuditLog(Base):
     details = Column(JSON, default=dict)
     ip_address = Column(String(50), default="127.0.0.1")
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+
+class AuditBlock(Base):
+    """
+    Blockchain-Style Tamper-Evident Audit Trail.
+
+    Each row is a 'block' in a cryptographic hash chain:
+      block_hash = SHA-256(canonical_event_json + previous_hash)
+
+    This protects the integrity of every security alert and incident.
+    Any tampering with a block's data will invalidate block_hash, and
+    all subsequent blocks will also fail verification (chain broken).
+
+    NOTE: This is a software-defined tamper-evident log — not a distributed
+    blockchain network. It provides cryptographic audit integrity within the
+    IBVAP system without external dependencies.
+    """
+    __tablename__ = "audit_blocks"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    # Sequential block index — must be monotonically increasing
+    block_index = Column(Integer, nullable=False, unique=True, index=True)
+    # The type of security event this block protects
+    event_type = Column(String(100), nullable=False)  # ALERT_CREATED, INCIDENT_CREATED, EVIDENCE_CREATED
+    # FK to the protected entity (alert_id or incident_id)
+    event_id = Column(String, nullable=False, index=True)
+    # camera that generated the event
+    camera_id = Column(String, nullable=True)
+    # SHA-256 of the canonicalized event data JSON
+    event_data_hash = Column(String(64), nullable=False)
+    # Hash of the previous block (genesis block uses '0' * 64)
+    previous_hash = Column(String(64), nullable=False)
+    # block_hash = SHA-256(event_data_hash + previous_hash)
+    block_hash = Column(String(64), nullable=False, unique=True, index=True)
+    # Authoritative UTC timestamp from the backend (never frontend-generated)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class ModelRegistry(Base):
     __tablename__ = "model_registry"

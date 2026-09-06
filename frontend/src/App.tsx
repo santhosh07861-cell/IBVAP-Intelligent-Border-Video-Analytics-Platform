@@ -23,6 +23,7 @@ import { AuditView } from './pages/AuditView';
 import { DemoControl } from './pages/DemoControl';
 import { EvidenceGallery } from './pages/EvidenceGallery';
 import { TacticalGISMap } from './pages/TacticalGISMap';
+import { BlockchainAudit } from './pages/BlockchainAudit';
 
 const ProtectedLayout: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -54,6 +55,7 @@ const ProtectedLayout: React.FC = () => {
             <Route path="/system-health" element={<HealthView />} />
             <Route path="/models" element={<ModelRegistryView />} />
             <Route path="/audit" element={<AuditView />} />
+            <Route path="/blockchain" element={<BlockchainAudit />} />
             <Route path="/demo" element={<DemoControl />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>

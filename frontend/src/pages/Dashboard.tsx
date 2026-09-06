@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, AlertOctagon, Bell, Users, FileText, ArrowUpRight, Plus, Shield, Eye } from 'lucide-react';
+import { Camera, AlertOctagon, Bell, Users, FileText, ArrowUpRight, Plus, Shield, Eye, Link2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useWebSocket } from '../context/WebSocketContext';
 import { useAuth } from '../context/AuthContext';
@@ -19,6 +19,7 @@ export const Dashboard: React.FC = () => {
   });
   const [activeToastAlert, setActiveToastAlert] = useState<any | null>(null);
   const [selectedEvidence, setSelectedEvidence] = useState<any | null>(null);
+  const [chainIntegrity, setChainIntegrity] = useState<{ valid: boolean; total_blocks: number } | null>(null);
 
   const navigate = useNavigate();
   // ✅ Consume canonical latestAlerts from shared WebSocket context — no competing local state
@@ -47,6 +48,22 @@ export const Dashboard: React.FC = () => {
   useEffect(() => {
     fetchKpis();
     const interval = setInterval(fetchKpis, 5000);
+    return () => clearInterval(interval);
+  }, [token]);
+
+  // Poll blockchain chain integrity every 30s
+  useEffect(() => {
+    const fetchChain = async () => {
+      try {
+        const authToken = token || localStorage.getItem('ibvap_token');
+        const headers: any = {};
+        if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+        const res = await fetch('/api/blockchain/verify', { headers });
+        if (res.ok) setChainIntegrity(await res.json());
+      } catch {}
+    };
+    fetchChain();
+    const interval = setInterval(fetchChain, 30000);
     return () => clearInterval(interval);
   }, [token]);
 
@@ -126,7 +143,7 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* KPI Cards Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         <div className="bg-[#111622] p-4 rounded-xl border border-[#252d42] hover:border-blue-500/40 transition-colors">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-mono text-slate-400">CAMERAS ONLINE</span>
@@ -176,6 +193,36 @@ export const Dashboard: React.FC = () => {
             {kpis?.anpr_events ?? 0}
           </div>
         </div>
+
+        {/* Blockchain Chain Integrity KPI */}
+        <Link
+          to="/blockchain"
+          className={`p-4 rounded-xl border transition-colors block ${
+            chainIntegrity === null
+              ? 'bg-[#111622] border-[#252d42] hover:border-cyan-500/40'
+              : chainIntegrity.valid
+              ? 'bg-cyan-950/20 border-cyan-500/30 hover:border-cyan-400/50'
+              : 'bg-red-950/20 border-red-500/50 animate-pulse'
+          }`}
+        >
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-mono text-slate-400">BLOCKCHAIN</span>
+            <Link2 className={`w-4 h-4 ${
+              chainIntegrity === null ? 'text-slate-500'
+                : chainIntegrity.valid ? 'text-cyan-400' : 'text-red-400'
+            }`} />
+          </div>
+          <div className={`text-lg font-bold font-mono ${
+            chainIntegrity === null ? 'text-slate-500'
+              : chainIntegrity.valid ? 'text-cyan-400' : 'text-red-400'
+          }`}>
+            {chainIntegrity === null ? '—'
+              : chainIntegrity.valid ? '✓ INTACT' : '⚠ BROKEN'}
+          </div>
+          <div className="text-[10px] font-mono text-slate-600 mt-0.5">
+            {chainIntegrity ? `${chainIntegrity.total_blocks} block${chainIntegrity.total_blocks !== 1 ? 's' : ''}` : 'SHA-256 chain'}
+          </div>
+        </Link>
       </div>
 
       {/* Main Section: Primary Camera Feed & Live Alerts Feed */}

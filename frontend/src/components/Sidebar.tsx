@@ -4,7 +4,7 @@ import { useWebSocket } from '../context/WebSocketContext';
 import {
   LayoutDashboard, Video, Globe, Camera, Shapes, Bell, AlertOctagon,
   FileText, UserCheck, BarChart3, Activity, HeartPulse, Cpu,
-  ShieldCheck, PlaySquare, Scan
+  ShieldCheck, PlaySquare, Scan, Link2
 } from 'lucide-react';
 
 const navItems = [
@@ -23,6 +23,7 @@ const navItems = [
   { path: '/system-health', label: 'System Health', icon: HeartPulse },
   { path: '/models', label: 'AI Model Registry', icon: Cpu },
   { path: '/audit', label: 'Audit Logs', icon: ShieldCheck },
+  { path: '/blockchain', label: 'Blockchain Audit Trail', icon: Link2, highlight: 'blockchain' },
   { path: '/demo', label: 'SIH Demo Center', icon: PlaySquare, highlight: true }
 ];
 
@@ -62,13 +63,19 @@ export const Sidebar: React.FC = () => {
                 `flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-medium transition-all ${
                   isActive
                     ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30 font-semibold'
+                    : item.highlight === 'blockchain'
+                    ? 'bg-cyan-950/40 text-cyan-300 border border-cyan-800/40 hover:bg-cyan-900/30'
                     : item.highlight
                     ? 'bg-red-950/40 text-red-300 border border-red-800/40 hover:bg-red-900/40'
                     : 'text-slate-400 hover:bg-[#1a2030] hover:text-slate-200'
                 }`
               }
             >
-              <Icon className={`w-4 h-4 ${item.highlight ? 'text-red-400 animate-pulse' : ''}`} />
+              <Icon className={`w-4 h-4 ${
+                item.highlight === 'blockchain' ? 'text-cyan-400 animate-pulse'
+                  : item.highlight ? 'text-red-400 animate-pulse'
+                  : ''
+              }`} />
               <span>{item.label}</span>
             </NavLink>
           );

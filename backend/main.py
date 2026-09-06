@@ -24,6 +24,7 @@ from backend.routers import (
     health_router, model_router, audit_router, demo_router,
     evidence_router
 )
+from backend.routers import blockchain_router
 from ai_engine.tracking.tracker import MultiObjectTracker
 
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +32,36 @@ logger = logging.getLogger(__name__)
 
 # Initialize DB tables
 Base.metadata.create_all(bind=engine)
+
+def _ensure_sqlite_schema():
+    """Ensure newly added columns exist in sqlite tables if created prior."""
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        with engine.connect() as conn:
+            if "alerts" in tables:
+                alert_cols = {c["name"] for c in inspector.get_columns("alerts")}
+                missing_alert = {
+                    "event_id": "TEXT REFERENCES events(id)",
+                    "track_id": "INTEGER",
+                    "zone_id": "TEXT",
+                    "zone_name": "TEXT",
+                    "location": "TEXT",
+                    "details": "TEXT DEFAULT '{}'"
+                }
+                for col_name, col_type in missing_alert.items():
+                    if col_name not in alert_cols:
+                        conn.execute(text(f"ALTER TABLE alerts ADD COLUMN {col_name} {col_type}"))
+            if "incidents" in tables:
+                inc_cols = {c["name"] for c in inspector.get_columns("incidents")}
+                if "alert_id" not in inc_cols:
+                    conn.execute(text("ALTER TABLE incidents ADD COLUMN alert_id TEXT REFERENCES alerts(id)"))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Schema auto-migration check notice: {e}")
+
+_ensure_sqlite_schema()
 
 app = FastAPI(
     title="IBVAP - Intelligent Border Video Analytics Platform",
@@ -104,6 +135,7 @@ app.include_router(audit_router.router)
 app.include_router(demo_router.router)
 app.include_router(evidence_router.router)
 app.include_router(evidence_router.detections_router)
+app.include_router(blockchain_router.router)  # Blockchain tamper-evident audit trail
 
 # WebSocket Connection Manager
 class ConnectionManager:
@@ -113,19 +145,48 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-        logger.info(f"WebSocket client connected. Total active: {len(self.active_connections)}")
+        logger.info(f"[WEBSOCKET_CONNECTED] total_active={len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-            logger.info("WebSocket client disconnected.")
+            logger.info(f"[WEBSOCKET_DISCONNECTED] total_active={len(self.active_connections)}")
 
     async def broadcast(self, message: dict):
-        for connection in self.active_connections:
+        """
+        Broadcast to all active WebSocket connections.
+        Dead connections are collected and removed after each cycle
+        to prevent memory leak from stale sockets accumulating.
+        """
+        dead_connections: List[WebSocket] = []
+        msg_type = message.get("type", "UNKNOWN")
+
+        for connection in list(self.active_connections):
             try:
                 await connection.send_json(message)
             except Exception:
-                pass
+                # Socket is broken — mark for cleanup
+                dead_connections.append(connection)
+
+        # Remove dead connections AFTER iterating (avoids modifying list during loop)
+        for dead in dead_connections:
+            if dead in self.active_connections:
+                self.active_connections.remove(dead)
+
+        if dead_connections:
+            logger.warning(f"[WEBSOCKET_CLEANUP] removed={len(dead_connections)} dead sockets remaining={len(self.active_connections)}")
+
+        # Structured pipeline broadcast log for key security events
+        if msg_type in ("ALERT_NEW", "INCIDENT_NEW", "EVIDENCE_NEW", "ANPR_WATCHLIST_MATCH", "FACE_WATCHLIST_MATCH"):
+            alert_id = message.get("alert_id", "")
+            incident_id = message.get("incident_id", "")
+            camera = message.get("camera_number") or message.get("camera_id", "")
+            event_type = message.get("event_type", "")
+            severity = message.get("severity", "")
+            if msg_type in ("ALERT_NEW", "FACE_WATCHLIST_MATCH", "ANPR_WATCHLIST_MATCH"):
+                logger.info(f"[ALERT_NEW_BROADCAST] type={msg_type} alert_id={alert_id} camera={camera} event_type={event_type} severity={severity} recipients={len(self.active_connections)}")
+            elif msg_type == "INCIDENT_NEW":
+                logger.info(f"[INCIDENT_NEW_BROADCAST] incident_id={incident_id} alert_id={alert_id} camera={camera} recipients={len(self.active_connections)}")
 
 manager = ConnectionManager()
 
@@ -140,6 +201,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
 
 @app.on_event("startup")
 async def startup_event():

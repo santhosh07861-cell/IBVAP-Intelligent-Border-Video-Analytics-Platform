@@ -19,8 +19,16 @@ from ai_engine.surveillance_agent import AISurveillanceAgent
 
 logger = logging.getLogger(__name__)
 
-# Global semaphore to limit concurrent AI model inference across all active cameras
-GLOBAL_INFERENCE_SEMAPHORE = asyncio.Semaphore(4)
+# Global inference semaphore — created lazily inside the running event loop
+# to avoid Python 3.12+ asyncio deprecation for module-level Semaphore creation.
+_INFERENCE_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+def _get_inference_semaphore() -> asyncio.Semaphore:
+    """Lazily create the inference semaphore inside the running event loop."""
+    global _INFERENCE_SEMAPHORE
+    if _INFERENCE_SEMAPHORE is None:
+        _INFERENCE_SEMAPHORE = asyncio.Semaphore(4)
+    return _INFERENCE_SEMAPHORE
 
 class StreamWorker:
     def __init__(self, camera_id: str, source_type: str, source_path: str, websocket_manager):
@@ -70,7 +78,7 @@ class StreamWorker:
             return
         self.is_inferencing = True
         try:
-            async with GLOBAL_INFERENCE_SEMAPHORE:
+            async with _get_inference_semaphore():
                 result = await self.agent.process_frame(frame, loop_start, pre_frame=pre_frame)
                 if len(result) == 5:
                     objs, lat, conf, faces, anpr_objs = result
@@ -82,6 +90,11 @@ class StreamWorker:
                 self.latest_anpr_objs = anpr_objs
                 self.latest_latency_ms = lat
                 self.last_ai_time = time.time()
+                # Structured log: track updates
+                if objs:
+                    confirmed = [o for o in objs if getattr(o, 'is_confirmed', False)]
+                    if confirmed:
+                        logger.debug(f"[TRACK_UPDATED] camera={self.camera_id} confirmed_tracks={len(confirmed)} latency_ms={lat:.1f}")
         except Exception as e:
             logger.error(f"Error in async AI step for camera {self.camera_id}: {e}", exc_info=True)
         finally:
@@ -107,7 +120,7 @@ class StreamWorker:
 
         initial_status = getattr(self.source, "status", "ONLINE")
         self._update_db_status(initial_status, fps=0.0, latency_ms=0.0, force=True)
-        logger.info(f"[CAMERA ONLINE] camera={self.camera_id} status={initial_status} source={self.source_type}")
+        logger.info(f"[CAMERA_CONNECTED] camera={self.camera_id} status={initial_status} source_type={self.source_type} path={self.source_path}")
 
         consecutive_read_failures = 0
 
@@ -125,7 +138,7 @@ class StreamWorker:
                 source_status = getattr(self.source, "status", "ERROR")
                 if consecutive_read_failures >= 10:
                     self._update_db_status(source_status, fps=0.0, latency_ms=0.0)
-                    logger.warning(f"[CAMERA OFFLINE] camera={self.camera_id} status={source_status} read_failures={consecutive_read_failures} dropped={self.dropped_frames}")
+                    logger.warning(f"[CAMERA_DISCONNECTED] camera={self.camera_id} status={source_status} consecutive_failures={consecutive_read_failures} total_dropped={self.dropped_frames}")
                 await asyncio.sleep(0.1)
                 continue
 
