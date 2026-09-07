@@ -51,7 +51,7 @@ const ProtectedLayout: React.FC = () => {
             <Route path="/anpr" element={<ANPRView />} />
             <Route path="/faces" element={<FaceView />} />
             <Route path="/analytics" element={<Analytics />} />
-            <Route path="/camera-health" element={<HealthView />} />
+            <Route path="/camera-health" element={<Navigate to="/system-health" replace />} />
             <Route path="/system-health" element={<HealthView />} />
             <Route path="/models" element={<ModelRegistryView />} />
             <Route path="/audit" element={<AuditView />} />

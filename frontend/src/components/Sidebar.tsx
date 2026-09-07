@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import { useWebSocket } from '../context/WebSocketContext';
 import {
   LayoutDashboard, Video, Globe, Camera, Shapes, Bell, AlertOctagon,
-  FileText, UserCheck, BarChart3, Activity, HeartPulse, Cpu,
+  FileText, UserCheck, BarChart3, HeartPulse, Cpu,
   ShieldCheck, PlaySquare, Scan, Link2
 } from 'lucide-react';
 
@@ -19,7 +19,6 @@ const navItems = [
   { path: '/anpr', label: 'ANPR License Plates', icon: FileText },
   { path: '/faces', label: 'Face Detections', icon: UserCheck },
   { path: '/analytics', label: 'Border Analytics', icon: BarChart3 },
-  { path: '/camera-health', label: 'Camera Health', icon: Activity },
   { path: '/system-health', label: 'System Health', icon: HeartPulse },
   { path: '/models', label: 'AI Model Registry', icon: Cpu },
   { path: '/audit', label: 'Audit Logs', icon: ShieldCheck },
