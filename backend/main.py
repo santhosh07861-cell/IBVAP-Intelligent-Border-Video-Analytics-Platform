@@ -57,6 +57,10 @@ def _ensure_sqlite_schema():
                 inc_cols = {c["name"] for c in inspector.get_columns("incidents")}
                 if "alert_id" not in inc_cols:
                     conn.execute(text("ALTER TABLE incidents ADD COLUMN alert_id TEXT REFERENCES alerts(id)"))
+            if "cameras" in tables:
+                cam_cols = {c["name"] for c in inspector.get_columns("cameras")}
+                if "rotation" not in cam_cols:
+                    conn.execute(text("ALTER TABLE cameras ADD COLUMN rotation INTEGER DEFAULT 0"))
             conn.commit()
     except Exception as e:
         logger.warning(f"Schema auto-migration check notice: {e}")

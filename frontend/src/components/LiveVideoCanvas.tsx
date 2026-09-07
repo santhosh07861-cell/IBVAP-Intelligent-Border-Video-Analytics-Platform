@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Eye, Moon, Bug } from 'lucide-react';
+import { Eye, Moon, Bug, RotateCw } from 'lucide-react';
 
 interface LiveVideoCanvasProps {
   cameraId?: string;
@@ -34,6 +34,8 @@ interface LiveVideoCanvasProps {
   inferenceMode?: string;
   cameraRole?: 'primary' | 'secondary';
   hideObjectDetections?: boolean;
+  rotation?: number;
+  onRotate?: (newRotation: number) => void;
 }
 
 export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
@@ -45,17 +47,24 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
   latencyMs = 0.0,
   inferenceMode,
   cameraRole,
-  hideObjectDetections = false
+  hideObjectDetections = false,
+  rotation = 0,
+  onRotate
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [thermalMode, setThermalMode] = useState<boolean>(false);
   const [nightVision, setNightVision] = useState<boolean>(false);
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [imageError, setImageError] = useState<boolean>(false);
+  const [currentRotation, setCurrentRotation] = useState<number>(rotation || 0);
+
+  useEffect(() => {
+    setCurrentRotation(rotation || 0);
+  }, [rotation]);
 
   const [activeZones, setActiveZones] = useState<Array<{ id: string; name: string; zone_type: string; coordinates: number[][] }>>([]);
 
-  const isStreaming = Boolean(cameraId && !imageError && (fps > 0 || !imageError));
+  const isStreaming = Boolean(cameraId && !imageError);
 
   useEffect(() => {
     setImageError(false);
@@ -348,16 +357,46 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
             <span className="text-slate-400">{cameraId}</span>
           </div>
           <div>Role: <strong>{cameraRole || 'secondary'}</strong></div>
-          <div>Status: <strong>{isStreaming ? 'STREAMING' : 'OFFLINE'}</strong></div>
+          <div>Status: <strong>{isStreaming ? (fps > 0 ? 'STREAMING' : 'CONNECTING') : 'OFFLINE'}</strong></div>
+          <div>Rotation: <strong>{currentRotation}°</strong></div>
           <div>Video FPS: <strong>{isStreaming ? fps : 0}</strong></div>
           <div>AI Latency: <strong>{isStreaming ? `${latencyMs}ms` : 'N/A'}</strong></div>
-          <div>Objects Tracked: <strong>{isStreaming ? detections.length : 0}</strong></div>
-          <div>Inference: <strong>{isStreaming ? (inferenceMode || 'REAL AI') : 'OFFLINE'}</strong></div>
+          <div>{hideObjectDetections ? 'Faces Tracked' : 'Objects Tracked'}: <strong>{isStreaming ? (hideObjectDetections ? (faces?.length || 0) : detections.length) : 0}</strong></div>
+          <div>Inference: <strong>{isStreaming ? (fps > 0 ? (inferenceMode || 'REAL AI | RUNNING') : 'INPUT NOT RECEIVED') : 'OFFLINE'}</strong></div>
         </div>
       )}
 
       {/* Controls */}
       <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/80 backdrop-blur p-1 rounded-lg border border-[#252d42] opacity-90 group-hover:opacity-100 transition-opacity z-20">
+        <button
+          onClick={() => {
+            const nextRot = (currentRotation + 90) % 360;
+            setCurrentRotation(nextRot);
+            if (onRotate) {
+              onRotate(nextRot);
+            } else if (cameraId) {
+              const token = localStorage.getItem('ibvap_token');
+              const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+              if (token) headers['Authorization'] = `Bearer ${token}`;
+              fetch(`/api/cameras/${cameraId}/rotation`, {
+                method: 'PUT',
+                headers,
+                body: JSON.stringify({ rotation: nextRot })
+              }).catch(() => {});
+            }
+          }}
+          disabled={!isStreaming}
+          className={`px-2 py-1 rounded text-[10px] font-mono font-bold flex items-center gap-1 transition-colors ${
+            !isStreaming
+              ? 'opacity-40 cursor-not-allowed text-slate-500 bg-slate-800'
+              : currentRotation > 0
+              ? 'bg-blue-600 text-white'
+              : 'text-slate-400 hover:text-white'
+          }`}
+          title={`Rotate Video (${currentRotation}°)`}
+        >
+          <RotateCw className="w-3 h-3" /> {currentRotation > 0 ? `${currentRotation}°` : 'ROTATE'}
+        </button>
         <button
           onClick={() => setShowDiagnostics(!showDiagnostics)}
           className={`p-1 rounded text-[11px] font-mono font-bold flex items-center gap-1 transition-colors ${
@@ -400,13 +439,29 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       {/* Footer Telemetry */}
       <div className="absolute bottom-0 left-0 right-0 p-2.5 bg-slate-950/90 border-t border-[#252d42] flex items-center justify-between text-[11px] text-slate-400 font-mono z-20">
         <div className="flex items-center gap-3">
-          <span>FPS: <strong className={isStreaming ? 'text-emerald-400' : 'text-slate-500'}>{isStreaming ? fps : 0}</strong></span>
-          <span>LATENCY: <strong className={isStreaming ? 'text-blue-400' : 'text-slate-500'}>{isStreaming ? `${latencyMs}ms` : 'N/A'}</strong></span>
-          <span>OBJECTS: <strong className={isStreaming ? 'text-amber-400' : 'text-slate-500'}>{isStreaming ? detections.length : 0}</strong></span>
+          <span>FPS: <strong className={isStreaming && fps > 0 ? 'text-emerald-400' : 'text-slate-500'}>{isStreaming ? fps : 0}</strong></span>
+          <span>LATENCY: <strong className={isStreaming && fps > 0 ? 'text-blue-400' : 'text-slate-500'}>{isStreaming && fps > 0 ? `${latencyMs}ms` : 'N/A'}</strong></span>
+          {hideObjectDetections ? (
+            <span>FACES: <strong className={isStreaming && faces.length > 0 ? 'text-blue-400 font-bold' : 'text-slate-400'}>{isStreaming ? faces.length : 0}</strong></span>
+          ) : (
+            <span>OBJECTS: <strong className={isStreaming && detections.length > 0 ? 'text-amber-400' : 'text-slate-500'}>{isStreaming ? detections.length : 0}</strong></span>
+          )}
         </div>
-        <span className={isStreaming ? 'text-emerald-400 font-bold tracking-wider font-mono' : 'text-slate-500 font-mono'}>
-          {isStreaming ? (inferenceMode || 'REAL AI | INFERENCE RUNNING') : 'CAMERA OFFLINE'}
-        </span>
+        {isStreaming ? (
+          fps > 0 ? (
+            <span className="text-emerald-400 font-bold tracking-wider font-mono flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              {inferenceMode || 'REAL AI | INFERENCE RUNNING'}
+            </span>
+          ) : (
+            <span className="text-amber-400 font-bold tracking-wider font-mono flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+              CAMERA: ONLINE | AI FRAME INPUT: NOT RECEIVED
+            </span>
+          )
+        ) : (
+          <span className="text-slate-500 font-mono">CAMERA OFFLINE</span>
+        )}
       </div>
     </div>
   );

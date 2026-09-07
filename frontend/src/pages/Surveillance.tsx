@@ -8,7 +8,7 @@ export const Surveillance: React.FC = () => {
   const [gridSize, setGridSize] = useState<number>(4);
   const [roleFilter, setRoleFilter] = useState<'all' | 'secondary' | 'primary'>('all');
 
-  const { cameras, secondaryCameras, primaryCamera } = useCameras();
+  const { cameras, secondaryCameras, primaryCamera, setCameraRotation } = useCameras();
   const { getCameraTelemetry } = useWebSocket();
 
   const filteredCameras = roleFilter === 'secondary'
@@ -122,6 +122,10 @@ export const Surveillance: React.FC = () => {
                   latencyMs={camLatency}
                   inferenceMode={camInferenceMode}
                   cameraRole={cam.role as 'primary' | 'secondary'}
+                  rotation={cam.rotation || 0}
+                  onRotate={async (r) => {
+                    await setCameraRotation(cam.camera_id, r);
+                  }}
                 />
               </div>
             );

@@ -13,7 +13,7 @@ import { formatISTDateTime, formatISTDate, formatISTTime } from '../utils/timeFo
 export const FaceView: React.FC = () => {
   const { token, user } = useAuth();
   const { lastMessage, telemetryMap } = useWebSocket();
-  const { cameras, primaryCamera } = useCameras();
+  const { cameras, primaryCamera, setCameraRotation } = useCameras();
   const [selectedCamId, setSelectedCamId] = useState<string>('');
 
   const activeCamera = cameras.find((c) => c.id === selectedCamId) || primaryCamera || cameras[0] || null;
@@ -362,8 +362,10 @@ export const FaceView: React.FC = () => {
     }
   };
 
-  // Current camera telemetry
-  const activeCameraTelemetry = activeCamera ? telemetryMap[activeCamera.camera_id] : null;
+  // Current camera telemetry (check both canonical camera_id and UUID)
+  const activeCameraTelemetry = activeCamera
+    ? (telemetryMap[activeCamera.camera_id] || telemetryMap[activeCamera.id] || null)
+    : null;
 
   // Real-time live face telemetry calculations
   const liveActiveFacesList = activeCameraTelemetry?.faces || [];
@@ -593,6 +595,12 @@ export const FaceView: React.FC = () => {
                 inferenceMode={activeCameraTelemetry?.inference_mode}
                 cameraRole={activeCamera?.role as any}
                 hideObjectDetections={true}
+                rotation={activeCamera?.rotation || 0}
+                onRotate={async (newRot) => {
+                  if (activeCamera) {
+                    await setCameraRotation(activeCamera.camera_id, newRot);
+                  }
+                }}
               />
             </div>
           </div>

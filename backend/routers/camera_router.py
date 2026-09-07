@@ -162,6 +162,7 @@ class CameraCreate(BaseModel):
     stream_url: str
     protocol: str = "MP4"  # RTSP, WEBCAM, MP4, ONVIF
     role: Optional[str] = "secondary"  # primary, secondary
+    rotation: Optional[int] = 0  # 0, 90, 180, 270
     is_demo: bool = False
 
 class CameraResponse(BaseModel):
@@ -180,7 +181,11 @@ class CameraResponse(BaseModel):
     fps: Optional[float] = 0.0
     resolution: Optional[str] = "1920x1080"
     analytics_enabled: Optional[bool] = True
+    rotation: Optional[int] = 0
     is_demo: Optional[bool] = False
+
+class CameraRotationRequest(BaseModel):
+    rotation: int  # 0, 90, 180, 270
 
 class TestConnectionRequest(BaseModel):
     protocol: str  # WEBCAM, RTSP, MP4, HTTP_MJPEG
@@ -302,6 +307,7 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_
         existing.longitude = payload.longitude
         existing.stream_url = normalized_url
         existing.protocol = payload.protocol.upper()
+        existing.rotation = payload.rotation if payload.rotation is not None else existing.rotation
         existing.is_demo = payload.is_demo
         db.commit()
         db.refresh(existing)
@@ -317,6 +323,7 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_
         longitude=payload.longitude,
         stream_url=normalized_url,
         protocol=payload.protocol.upper(),
+        rotation=payload.rotation or 0,
         status="OFFLINE",
         is_demo=payload.is_demo
     )
@@ -582,6 +589,33 @@ def stop_camera(camera_id: str, db: Session = Depends(get_db), current_user = De
         "status": "success",
         "message": f"Camera stream {cam.camera_id} stopped.",
         "camera_id": cam.camera_id
+    }
+
+@router.put("/{camera_id}/rotation", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def update_camera_rotation(camera_id: str, payload: CameraRotationRequest, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    cam = db.query(Camera).filter((Camera.id == camera_id) | (Camera.camera_id == camera_id)).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    rot = int(payload.rotation) % 360
+    if rot not in [0, 90, 180, 270]:
+        raise HTTPException(status_code=400, detail="Rotation angle must be 0, 90, 180, or 270 degrees.")
+
+    cam.rotation = rot
+    db.commit()
+    db.refresh(cam)
+
+    # Propagate immediately to running StreamWorker
+    from backend.stream_manager import stream_manager
+    worker = stream_manager.get_worker(cam.camera_id)
+    if worker:
+        worker.rotation = rot
+
+    return {
+        "status": "success",
+        "camera_id": cam.camera_id,
+        "rotation": cam.rotation,
+        "message": f"Camera rotation updated to {cam.rotation}°"
     }
 
 @router.post("/{camera_id}/set-primary", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])

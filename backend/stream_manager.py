@@ -31,11 +31,12 @@ def _get_inference_semaphore() -> asyncio.Semaphore:
     return _INFERENCE_SEMAPHORE
 
 class StreamWorker:
-    def __init__(self, camera_id: str, source_type: str, source_path: str, websocket_manager):
+    def __init__(self, camera_id: str, source_type: str, source_path: str, websocket_manager, rotation: int = 0):
         self.camera_id = camera_id
         self.source_type = source_type.upper()
         self.source_path = str(source_path).strip()
         self.ws_manager = websocket_manager
+        self.rotation = int(rotation) % 360
 
         self.is_running = False
         self.task: Optional[asyncio.Task] = None
@@ -140,6 +141,14 @@ class StreamWorker:
             consecutive_read_failures = 0
             self.frame_sequence += 1
             cap_ts = datetime.utcnow().isoformat() + "Z"
+
+            # Apply camera rotation if configured (0°, 90°, 180°, 270°)
+            if self.rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif self.rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif self.rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
             # Maintain rolling frame buffer (last 20 frames)
             self.frame_buffer.append(frame.copy())
@@ -316,14 +325,19 @@ class StreamManager:
         canonical_id, _ = self._resolve_camera_identifier(camera_id)
         return len(self.subscribers.get(canonical_id, set()))
 
-    def start_stream(self, camera_id: str, source_type: str, source_path: str, websocket_manager):
-        canonical_id, _ = self._resolve_camera_identifier(camera_id)
+    def start_stream(self, camera_id: str, source_type: str, source_path: str, websocket_manager, rotation: Optional[int] = None):
+        canonical_id, cam = self._resolve_camera_identifier(camera_id)
 
         if canonical_id in self.workers and self.workers[canonical_id].is_running:
             logger.info(f"Stream {canonical_id} is already running.")
             return
 
-        worker = StreamWorker(canonical_id, source_type, source_path, websocket_manager)
+        if rotation is None and cam and hasattr(cam, "rotation") and cam.rotation is not None:
+            rot_val = cam.rotation
+        else:
+            rot_val = rotation or 0
+
+        worker = StreamWorker(canonical_id, source_type, source_path, websocket_manager, rotation=rot_val)
         self.workers[canonical_id] = worker
 
         target_loop = None

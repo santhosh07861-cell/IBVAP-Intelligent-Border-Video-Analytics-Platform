@@ -24,7 +24,7 @@ export const Dashboard: React.FC = () => {
   const navigate = useNavigate();
   // ✅ Consume canonical latestAlerts from shared WebSocket context — no competing local state
   const { lastAlert, latestAlerts, getCameraTelemetry } = useWebSocket();
-  const { primaryCamera, cameras } = useCameras();
+  const { primaryCamera, cameras, setCameraRotation } = useCameras();
   const { token } = useAuth();
   const lastAlertIdRef = useRef<string | null>(null);
 
@@ -257,6 +257,12 @@ export const Dashboard: React.FC = () => {
             latencyMs={primaryTelemetry?.latency_ms || 0.0}
             inferenceMode={primaryOnline ? (primaryTelemetry?.inference_mode || 'REAL AI | INFERENCE RUNNING') : 'CAMERA OFFLINE'}
             cameraRole="primary"
+            rotation={primaryCamera?.rotation || 0}
+            onRotate={async (r) => {
+              if (primaryCamera) {
+                await setCameraRotation(primaryCamera.camera_id, r);
+              }
+            }}
           />
         </div>
 

@@ -15,6 +15,7 @@ export interface CameraModel {
   fps: number;
   resolution?: string;
   analytics_enabled?: boolean;
+  rotation?: number;
   is_demo?: boolean;
 }
 
@@ -26,6 +27,7 @@ interface CameraContextType {
   error: string | null;
   refreshCameras: () => Promise<void>;
   setPrimaryCamera: (cameraId: string) => Promise<boolean>;
+  setCameraRotation: (cameraId: string, rotation: number) => Promise<boolean>;
   startCameraStream: (cameraId: string) => Promise<boolean>;
   stopCameraStream: (cameraId: string) => Promise<boolean>;
   subscribeCamera: (cameraId: string, clientId?: string) => Promise<string | null>;
@@ -90,6 +92,25 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
     } catch (e) {
       console.error("Failed to set primary camera:", e);
+    }
+    return false;
+  };
+
+  const setCameraRotation = async (cameraId: string, rotation: number): Promise<boolean> => {
+    try {
+      const headers = getHeaders();
+      headers['Content-Type'] = 'application/json';
+      const res = await fetch(`/api/cameras/${cameraId}/rotation`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ rotation })
+      });
+      if (res.ok) {
+        setCameras(prev => prev.map(c => (c.camera_id === cameraId || c.id === cameraId) ? { ...c, rotation } : c));
+        return true;
+      }
+    } catch (e) {
+      console.error("Failed to update camera rotation:", e);
     }
     return false;
   };
@@ -164,6 +185,7 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         error,
         refreshCameras,
         setPrimaryCamera,
+        setCameraRotation,
         startCameraStream,
         stopCameraStream,
         subscribeCamera,

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Camera, Plus, CheckCircle2, RefreshCw, X, Play, Square, Trash2, Video, AlertTriangle, Shield, Cpu, Wifi, Search } from 'lucide-react';
+import { Camera, Plus, CheckCircle2, RefreshCw, X, Play, Square, Trash2, Video, AlertTriangle, Shield, Cpu, Wifi, Search, RotateCw } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useLocation } from 'react-router-dom';
 
@@ -65,6 +65,7 @@ export const CameraList: React.FC = () => {
     location: '',
     protocol: 'WEBCAM', // WEBCAM, RTSP, MP4
     stream_url: '0',
+    rotation: 0,
     latitude: 26.9124,
     longitude: 70.9025
   });
@@ -477,6 +478,7 @@ export const CameraList: React.FC = () => {
                 location: '',
                 protocol: 'WEBCAM',
                 stream_url: '0',
+                rotation: 0,
                 latitude: 26.9124,
                 longitude: 70.9025
               });
@@ -544,6 +546,7 @@ export const CameraList: React.FC = () => {
                 <th className="p-3">Location</th>
                 <th className="p-3">Protocol</th>
                 <th className="p-3">Role</th>
+                <th className="p-3">Rotation</th>
                 <th className="p-3">Status</th>
                 <th className="p-3">FPS</th>
                 <th className="p-3">Actions</th>
@@ -562,6 +565,23 @@ export const CameraList: React.FC = () => {
                     }`}>
                       {(c.role || 'secondary').toUpperCase()}
                     </span>
+                  </td>
+                  <td className="p-3">
+                    <button
+                      onClick={async () => {
+                        const nextRot = ((c.rotation || 0) + 90) % 360;
+                        await fetch(`/api/cameras/${c.camera_id}/rotation`, {
+                          method: 'PUT',
+                          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ rotation: nextRot })
+                        });
+                        fetchCameras();
+                      }}
+                      className="px-2 py-1 bg-[#0a0d14] hover:bg-slate-800 text-slate-300 border border-[#252d42] rounded text-[10px] font-mono font-bold flex items-center gap-1 transition-colors"
+                      title="Click to rotate camera orientation (0°, 90°, 180°, 270°)"
+                    >
+                      <RotateCw className="w-3 h-3 text-blue-400" /> {c.rotation || 0}°
+                    </button>
                   </td>
                   <td className="p-3">
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -766,6 +786,20 @@ export const CameraList: React.FC = () => {
                     className="w-full bg-[#0a0d14] border border-[#252d42] rounded p-2 text-slate-200 font-mono focus:border-blue-500 outline-none"
                     placeholder="Optional description"
                   />
+                </div>
+
+                <div>
+                  <label className="text-slate-400 block mb-1">Orientation / Rotation</label>
+                  <select
+                    value={form.rotation}
+                    onChange={(e) => setForm({ ...form, rotation: Number(e.target.value) })}
+                    className="w-full bg-[#0a0d14] border border-[#252d42] rounded p-2 text-slate-200 font-mono focus:border-blue-500 outline-none"
+                  >
+                    <option value={0}>0° (Standard Landscape / Webcams)</option>
+                    <option value={90}>90° (Clockwise / Portrait Mobile Phone)</option>
+                    <option value={180}>180° (Inverted / Ceiling Mounted)</option>
+                    <option value={270}>270° (Counter-Clockwise)</option>
+                  </select>
                 </div>
               </div>
 

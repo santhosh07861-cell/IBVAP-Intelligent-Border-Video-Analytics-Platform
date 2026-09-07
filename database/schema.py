@@ -53,6 +53,7 @@ class Camera(Base):
     resolution = Column(String(20), default="1920x1080")
     analytics_enabled = Column(Boolean, default=True)
     is_demo = Column(Boolean, default=False)
+    rotation = Column(Integer, default=0)  # 0, 90, 180, 270
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
