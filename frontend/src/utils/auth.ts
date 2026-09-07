@@ -4,7 +4,7 @@
  * Also sets Content-Type: application/json for non-GET requests with a body.
  */
 export function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  const token = localStorage.getItem('token') || sessionStorage.getItem('token') || '';
+  const token = localStorage.getItem('ibvap_token') || localStorage.getItem('token') || sessionStorage.getItem('ibvap_token') || sessionStorage.getItem('token') || '';
 
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string> || {}),

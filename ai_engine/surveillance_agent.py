@@ -813,9 +813,12 @@ class AISurveillanceAgent:
                 continue
             self.last_anpr_process_times[track_key] = now_sec
 
-            # Accurate vehicle classification from AI model
+            # Accurate vehicle classification from AI model with confidence check
             raw_class = (obj.class_name or "").lower().strip()
-            vehicle_type = VEHICLE_TYPE_MAP.get(raw_class, raw_class.upper() if raw_class else "CAR")
+            if obj.confidence < 0.40:
+                vehicle_type = "UNKNOWN"
+            else:
+                vehicle_type = VEHICLE_TYPE_MAP.get(raw_class, raw_class.upper() if raw_class in VEHICLE_CLASSES else "UNKNOWN")
 
             vx = max(0, int(obj.bbox[0] * fw))
             vy = max(0, int(obj.bbox[1] * fh))
@@ -843,12 +846,12 @@ class AISurveillanceAgent:
             )
 
             # Determine plate string, confidence and status
-            if plate_text and plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE"] and avg_conf >= 0.40:
+            if plate_text and plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE"] and avg_conf >= 0.40:
                 final_plate = plate_text
                 final_ocr_conf = avg_conf
                 status = "CONFIRMED"
             else:
-                final_plate = "UNKNOWN / UNREADABLE"
+                final_plate = "PLATE UNREADABLE"
                 final_ocr_conf = 0.0
                 status = "UNCERTAIN"
 
@@ -876,9 +879,9 @@ class AISurveillanceAgent:
                 # 1. Previous was unreadable and now we have a recognized plate
                 # 2. Previous had lower OCR confidence and now confidence is higher by >= 0.05
                 is_improved = False
-                if prev_plate == "UNKNOWN / UNREADABLE" and final_plate != "UNKNOWN / UNREADABLE":
+                if prev_plate in ["PLATE UNREADABLE", "UNKNOWN / UNREADABLE"] and final_plate not in ["PLATE UNREADABLE", "UNKNOWN / UNREADABLE"]:
                     is_improved = True
-                elif final_plate != "UNKNOWN / UNREADABLE" and final_ocr_conf > (prev_conf + 0.05):
+                elif final_plate not in ["PLATE UNREADABLE", "UNKNOWN / UNREADABLE"] and final_ocr_conf > (prev_conf + 0.05):
                     is_improved = True
 
                 if not is_improved:
@@ -898,12 +901,15 @@ class AISurveillanceAgent:
                 # Check Watchlist match if plate is valid
                 is_watchlist = False
                 watchlist_entry = None
-                if final_plate != "UNKNOWN / UNREADABLE":
-                    watchlist_entry = db.query(ANPRWatchlist).filter(
-                        ANPRWatchlist.plate_number == final_plate,
-                        ANPRWatchlist.is_active == True
-                    ).first()
-                    is_watchlist = watchlist_entry is not None
+                if final_plate not in ["PLATE UNREADABLE", "UNKNOWN / UNREADABLE", "PLATE UNCERTAIN"]:
+                    clean_search_plate = final_plate.upper().replace(" ", "").replace("-", "")
+                    active_watchlists = db.query(ANPRWatchlist).filter(ANPRWatchlist.is_active == True).all()
+                    for wl in active_watchlists:
+                        wl_clean = (wl.plate_number or "").upper().replace(" ", "").replace("-", "")
+                        if wl_clean and (wl_clean == clean_search_plate or wl_clean in clean_search_plate):
+                            is_watchlist = True
+                            watchlist_entry = wl
+                            break
 
                 final_status = "WATCHLIST_MATCH" if is_watchlist else status
 
@@ -1006,7 +1012,8 @@ class AISurveillanceAgent:
                     })
 
                     # If Watchlist match detected on this frame (and not previously alerted for this track)
-                    if is_watchlist and watchlist_entry and not existing_record:
+                    already_alerted = existing_record.get("is_watchlist", False) if existing_record else False
+                    if is_watchlist and watchlist_entry and not already_alerted:
                         severity = watchlist_entry.severity or "HIGH"
                         risk_score = 95.0 if severity == "CRITICAL" else 80.0
                         now_dt = datetime.utcnow()
@@ -1033,6 +1040,7 @@ class AISurveillanceAgent:
                             track_id=obj.track_id,
                         )
                         db.add(ev)
+                        db.flush()
 
                         al = Alert(
                             id=str(uuid.uuid4()),
@@ -1058,6 +1066,7 @@ class AISurveillanceAgent:
                             }
                         )
                         db.add(al)
+                        db.flush()
 
                         inc_num = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
                         inc_anpr = Incident(
@@ -1075,6 +1084,7 @@ class AISurveillanceAgent:
                             created_at=now_dt,
                         )
                         db.add(inc_anpr)
+                        db.flush()
                         al.incident_id = inc_anpr.id
 
                         if snap_path:

@@ -107,8 +107,8 @@ class MultiObjectTracker:
         now = datetime.utcnow()
         now_str = now.isoformat()
 
-        # Clean expired lost tracks (> 30s)
-        expired_lost = [tid for tid, info in self.recent_lost_tracks.items() if (now - info["lost_at"]).total_seconds() > 30.0]
+        # Clean expired lost tracks (> 1.5s)
+        expired_lost = [tid for tid, info in self.recent_lost_tracks.items() if (now - info["lost_at"]).total_seconds() > 1.5]
         for tid in expired_lost:
             del self.recent_lost_tracks[tid]
 
@@ -283,13 +283,12 @@ class MultiObjectTracker:
         class_id = det.class_id if hasattr(det, 'class_id') else det.get('class_id', 0)
         is_fallback = det.is_fallback if hasattr(det, 'is_fallback') else det.get('is_fallback', False)
 
-        # 1. Attempt to re-activate a recently lost track if close in space and class
+        # 1. Attempt to re-activate a recently lost track ONLY for momentary occlusion (< 1.5s, high IoU > 0.40)
         matched_lost_id = None
         for l_id, l_info in list(self.recent_lost_tracks.items()):
-            if l_info["class_name"].lower() == class_name.lower():
-                dist = math.hypot(l_info["center"][0] - center[0], l_info["center"][1] - center[1])
+            if (now - l_info["lost_at"]).total_seconds() <= 1.5 and l_info["class_name"].lower() == class_name.lower():
                 iou = compute_iou(l_info["bbox"], bbox)
-                if iou > 0.20 or dist < 0.18:
+                if iou > 0.40:
                     matched_lost_id = l_id
                     break
 

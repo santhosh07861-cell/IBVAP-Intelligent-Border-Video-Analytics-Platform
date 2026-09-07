@@ -37,11 +37,12 @@ ANPR_SNAPSHOT_DIR = "storage/evidence/anpr/snapshots"
 # ─── Request/Response Models ──────────────────────────────────────────────────
 
 class ANPRWatchlistCreate(BaseModel):
-    plate_number: str = Field(..., min_length=4, max_length=30, description="Plate number to watchlist (uppercase)")
+    plate_number: str = Field(..., min_length=2, max_length=30, description="Plate number to watchlist (uppercase)")
     vehicle_type: Optional[str] = None
     reason: Optional[str] = None
     severity: str = Field("HIGH", description="HIGH or CRITICAL")
     notes: Optional[str] = None
+    region: Optional[str] = None
 
 class ANPRWatchlistUpdate(BaseModel):
     is_active: Optional[bool] = None
@@ -231,12 +232,13 @@ def add_to_watchlist(
         raise HTTPException(status_code=400, detail="plate_number cannot be empty")
 
     existing = db.query(ANPRWatchlist).filter(ANPRWatchlist.plate_number == plate).first()
+    notes_val = payload.notes or payload.region
     if existing:
         # Re-activate if previously disabled
         existing.is_active = True
         existing.reason = payload.reason or existing.reason
         existing.severity = payload.severity or existing.severity
-        existing.notes = payload.notes or existing.notes
+        existing.notes = notes_val or existing.notes
         db.commit()
         db.refresh(existing)
         logger.info(f"[ANPR WATCHLIST] Re-activated plate: {plate}")
@@ -250,7 +252,7 @@ def add_to_watchlist(
         reason=payload.reason,
         severity=payload.severity.upper() if payload.severity else "HIGH",
         is_active=True,
-        notes=payload.notes,
+        notes=notes_val,
         added_by=current_user.username,
         created_at=datetime.utcnow(),
     )

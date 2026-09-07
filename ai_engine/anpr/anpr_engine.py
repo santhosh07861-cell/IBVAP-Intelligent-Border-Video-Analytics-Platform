@@ -602,10 +602,10 @@ def save_anpr_evidence_snapshot(
         cv2.rectangle(annotated, (px, py), (px2, py2), plate_color, 2)
 
         # Plate number label on plate box
-        if plate_text != "PLATE UNCERTAIN":
+        if plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE"]:
             p_label = f"{plate_text} | OCR:{int(ocr_confidence * 100)}%"
         else:
-            p_label = "PLATE UNCERTAIN"
+            p_label = "PLATE UNREADABLE"
 
         (ptw, pth), _ = cv2.getTextSize(p_label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
         ply = min(fh - 4, py2 + 16)
