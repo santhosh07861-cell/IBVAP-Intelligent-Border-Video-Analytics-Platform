@@ -17,21 +17,29 @@ from database.schema import FaceWatchlist
 
 logger = logging.getLogger(__name__)
 
-# Configurable Parameters
-FACE_CONFIDENCE_THRESHOLD = float(os.getenv("FACE_CONFIDENCE_THRESHOLD", "0.60"))
-MIN_FACE_SIZE = int(os.getenv("MIN_FACE_SIZE", "36"))
-MIN_FACE_QUALITY = float(os.getenv("MIN_FACE_QUALITY", "0.45"))
-FACE_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.38"))
-FACE_RECOGNITION_INTERVAL_SEC = float(os.getenv("FACE_RECOGNITION_INTERVAL_SEC", "2.0"))
-FACE_TRACK_CONFIRMATION_FRAMES = int(os.getenv("FACE_TRACK_CONFIRMATION_FRAMES", "3"))
-FACE_TRACK_MAX_DISAPPEARED = int(os.getenv("FACE_TRACK_MAX_DISAPPEARED", "15"))
-
-# Import from config to stay in sync (lazy import to avoid circular deps)
+# Configurable Parameters with backend.config imports
 try:
-    from backend.config import WATCHLIST_FACE_CONFIRMATION_FRAMES as _WCF
-    WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES = _WCF
+    from backend.config import (
+        FACE_CONFIDENCE_THRESHOLD,
+        MIN_FACE_SIZE,
+        MIN_FACE_QUALITY,
+        FACE_RECOGNITION_THRESHOLD,
+        FACE_RECOGNITION_INTERVAL_SEC,
+        FACE_TRACK_CONFIRMATION_FRAMES,
+        FACE_TRACK_MAX_DISAPPEARED,
+        WATCHLIST_FACE_CONFIRMATION_FRAMES
+    )
+    WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES = WATCHLIST_FACE_CONFIRMATION_FRAMES
 except ImportError:
+    FACE_CONFIDENCE_THRESHOLD = float(os.getenv("FACE_CONFIDENCE_THRESHOLD", "0.55"))
+    MIN_FACE_SIZE = int(os.getenv("MIN_FACE_SIZE", "28"))
+    MIN_FACE_QUALITY = float(os.getenv("MIN_FACE_QUALITY", "0.35"))
+    FACE_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.38"))
+    FACE_RECOGNITION_INTERVAL_SEC = float(os.getenv("FACE_RECOGNITION_INTERVAL_SEC", "1.5"))
+    FACE_TRACK_CONFIRMATION_FRAMES = int(os.getenv("FACE_TRACK_CONFIRMATION_FRAMES", "2"))
+    FACE_TRACK_MAX_DISAPPEARED = int(os.getenv("FACE_TRACK_MAX_DISAPPEARED", "20"))
     WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES = int(os.getenv("WATCHLIST_FACE_CONFIRMATION_FRAMES", "2"))
+
 
 
 def calculate_iou(boxA: List[float], boxB: List[float]) -> float:
@@ -325,6 +333,9 @@ class RealFaceEngine:
             score = float(face_arr[14])
 
             if score < self.conf_threshold:
+                continue
+
+            if fw < self.min_face_size or fh < self.min_face_size:
                 continue
 
             fx = max(0, min(w - 1, fx))

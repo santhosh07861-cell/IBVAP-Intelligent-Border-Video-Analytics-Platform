@@ -25,52 +25,66 @@ ALERT_COOLDOWN_SEC = float(os.getenv("ALERT_COOLDOWN_SEC", "30.0"))
 ZONE_INTRUSION_COOLDOWN_SEC = float(os.getenv("ZONE_INTRUSION_COOLDOWN_SEC", "30.0"))
 ZONE_LOITERING_COOLDOWN_SEC = float(os.getenv("ZONE_LOITERING_COOLDOWN_SEC", "60.0"))
 ZONE_EXIT_DEBOUNCE_FRAMES = int(os.getenv("ZONE_EXIT_DEBOUNCE_FRAMES", "10"))
-FACE_RECORD_COOLDOWN_SEC = float(os.getenv("FACE_RECORD_COOLDOWN_SEC", "60.0"))
+# ─── Face Detection & Recognition Configuration ──────────────────────────────
+# FACE_CONFIDENCE_THRESHOLD:
+#   Minimum score from YuNet deep neural network face detector (0.0 to 1.0).
+#   0.55 provides high precision while catching moderate face angles & lighting.
+FACE_CONFIDENCE_THRESHOLD = float(os.getenv("FACE_CONFIDENCE_THRESHOLD", "0.55"))
 
+# MIN_FACE_SIZE:
+#   Minimum width and height in pixels for a valid face detection crop.
+MIN_FACE_SIZE = int(os.getenv("MIN_FACE_SIZE", "28"))
+
+# MIN_FACE_QUALITY:
+#   Multi-metric face quality score threshold (0.0 to 1.0) combining Laplacian blur,
+#   exposure/brightness, contrast, and resolution.
+MIN_FACE_QUALITY = float(os.getenv("MIN_FACE_QUALITY", "0.35"))
+
+# FACE_RECOGNITION_THRESHOLD:
+#   Cosine similarity threshold for SFace 128-dimensional facial embedding matching.
+#   OpenCV FaceRecognizerSF cosine distance baseline: 0.363; standard: 0.380.
+FACE_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.38"))
+
+# FACE_RECOGNITION_INTERVAL_SEC:
+#   Interval in seconds to re-evaluate SFace embedding on a continuous face track.
+FACE_RECOGNITION_INTERVAL_SEC = float(os.getenv("FACE_RECOGNITION_INTERVAL_SEC", "1.5"))
+
+# FACE_TRACK_CONFIRMATION_FRAMES:
+#   Consecutive frames required to confirm a new FaceTrack before database logging.
+FACE_TRACK_CONFIRMATION_FRAMES = int(os.getenv("FACE_TRACK_CONFIRMATION_FRAMES", "2"))
+
+# FACE_TRACK_MAX_DISAPPEARED:
+#   Maximum missed frames before a FaceTrack is terminated.
+FACE_TRACK_MAX_DISAPPEARED = int(os.getenv("FACE_TRACK_MAX_DISAPPEARED", "20"))
+
+# FACE_RECORD_COOLDOWN_SEC:
+#   Cooldown in seconds between persisting successive FaceDetection database rows
+#   for the SAME continuously present face track.
+FACE_RECORD_COOLDOWN_SEC = float(os.getenv("FACE_RECORD_COOLDOWN_SEC", "15.0"))
 
 # ─── ANPR (Automatic Number Plate Recognition) Configuration ─────────────────
-# ANPR_PLATE_CONFIDENCE_THRESHOLD:
-#   Minimum score from the contour-based plate candidate detector to attempt OCR.
-#   Set low (0.35) because we prefer false-positives (attempted OCR on a non-plate)
-#   over false-negatives (skipping a real plate). Multi-frame confirmation filters noise.
 ANPR_PLATE_CONFIDENCE_THRESHOLD = float(os.getenv("ANPR_PLATE_CONFIDENCE_THRESHOLD", "0.35"))
-
-# ANPR_OCR_CONFIDENCE_THRESHOLD:
-#   Minimum EasyOCR character confidence (0-1) to accept a reading.
-#   Below this threshold the result is marked UNCERTAIN rather than accepted.
-#   0.60 is the EasyOCR "reasonable confidence" boundary for license plate text.
 ANPR_OCR_CONFIDENCE_THRESHOLD = float(os.getenv("ANPR_OCR_CONFIDENCE_THRESHOLD", "0.60"))
-
-# ANPR_CONFIRMATION_FRAMES:
-#   Number of consecutive video frames in which the SAME plate text must appear
-#   before the result is treated as confirmed. Mirrors TRACK_CONFIRMATION_FRAMES.
-#   3 frames at ~8 AI-FPS = ~375ms of consistent evidence required.
 ANPR_CONFIRMATION_FRAMES = int(os.getenv("ANPR_CONFIRMATION_FRAMES", "3"))
-
-# ANPR_TRACK_TIMEOUT:
-#   Seconds without a new frame for a given vehicle track before its plate state
-#   is expired. Prevents stale state for vehicles that leave the scene.
 ANPR_TRACK_TIMEOUT = float(os.getenv("ANPR_TRACK_TIMEOUT", "10.0"))
-
-# ANPR_DUPLICATE_COOLDOWN_SEC:
-#   Per-(camera_id, plate_number) cooldown. Prevents creating hundreds of DB records
-#   for a single stationary vehicle. Consistent with face watchlist 30s pattern.
 ANPR_DUPLICATE_COOLDOWN_SEC = float(os.getenv("ANPR_DUPLICATE_COOLDOWN_SEC", "30.0"))
 
 # ─── Face Alert Deduplication Configuration ───────────────────────────────────
 # UNKNOWN_PERSON_ALERT_REFIRE_SEC:
 #   Minimum seconds before a second UNKNOWN_PERSON_DETECTED alert can be created
-#   for the SAME face track_id. Once an alert is active for a track, no new alert
-#   is generated until this interval expires AND the track leaves+re-enters frame.
-#   Default: 300s (5 min). Set to 0 to disable re-alerting entirely.
+#   for the SAME face track_id.
+#   Default: 300s (5 min).
 UNKNOWN_PERSON_ALERT_REFIRE_SEC = float(os.getenv("UNKNOWN_PERSON_ALERT_REFIRE_SEC", "300.0"))
 
 # WATCHLIST_FACE_ALERT_REFIRE_SEC:
-#   Same cooldown for FACE_WATCHLIST_MATCH events.
-WATCHLIST_FACE_ALERT_REFIRE_SEC = float(os.getenv("WATCHLIST_FACE_ALERT_REFIRE_SEC", "300.0"))
+#   Cooldown for FACE_WATCHLIST_MATCH alerts to prevent alert spamming.
+#   Default: 120s (2 min).
+WATCHLIST_FACE_ALERT_REFIRE_SEC = float(os.getenv("WATCHLIST_FACE_ALERT_REFIRE_SEC", "120.0"))
 
 # WATCHLIST_FACE_CONFIRMATION_FRAMES:
 #   Number of consecutive high-quality recognition frames required before a
 #   FACE_WATCHLIST_MATCH alert is generated. Prevents single-frame false positives.
 #   Default: 2 (two consecutive frames with the same identity match).
 WATCHLIST_FACE_CONFIRMATION_FRAMES = int(os.getenv("WATCHLIST_FACE_CONFIRMATION_FRAMES", "2"))
+
+

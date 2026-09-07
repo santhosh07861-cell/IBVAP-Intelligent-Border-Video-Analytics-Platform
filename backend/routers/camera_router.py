@@ -196,6 +196,7 @@ class TestConnectionResponse(BaseModel):
     height: int
     latency_ms: float
     error: Optional[str] = None
+    error_type: Optional[str] = None
     message: str
 
 @router.get("", response_model=List[CameraResponse])
@@ -388,6 +389,7 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
             "height": 0,
             "latency_ms": 0.0,
             "error": err_str,
+            "error_type": "INVALID_URL",
             "message": err_str
         }
 

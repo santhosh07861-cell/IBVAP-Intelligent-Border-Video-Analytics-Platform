@@ -365,6 +365,19 @@ export const FaceView: React.FC = () => {
   // Current camera telemetry
   const activeCameraTelemetry = activeCamera ? telemetryMap[activeCamera.camera_id] : null;
 
+  // Real-time live face telemetry calculations
+  const liveActiveFacesList = activeCameraTelemetry?.faces || [];
+  const liveActiveCount = liveActiveFacesList.length > 0 ? liveActiveFacesList.length : (kpis.active_faces || 0);
+  const liveKnownCount = liveActiveFacesList.length > 0
+    ? liveActiveFacesList.filter((f: any) => f.recognition_status === 'KNOWN' || f.recognition_status === 'VERIFIED').length
+    : (kpis.known_faces || 0);
+  const liveUnknownCount = liveActiveFacesList.length > 0
+    ? liveActiveFacesList.filter((f: any) => f.recognition_status === 'UNKNOWN').length
+    : (kpis.unknown_faces || 0);
+  const liveUncertainCount = liveActiveFacesList.length > 0
+    ? liveActiveFacesList.filter((f: any) => f.recognition_status === 'UNCERTAIN').length
+    : (kpis.uncertain_faces || 0);
+
   return (
     <div className="p-6 space-y-6 font-mono">
       {/* ── Top Live Danger Alert Banner ── */}
@@ -495,7 +508,7 @@ export const FaceView: React.FC = () => {
           <div className="text-[10px] text-slate-400 uppercase tracking-wider flex items-center gap-1">
             <Eye className="w-3 h-3 text-blue-400" /> Active Faces
           </div>
-          <div className="text-xl font-bold text-blue-400 font-mono">{kpis.active_faces}</div>
+          <div className="text-xl font-bold text-blue-400 font-mono">{liveActiveCount}</div>
           <div className="text-[9px] text-slate-500">Live In Frame</div>
         </div>
 
@@ -503,7 +516,7 @@ export const FaceView: React.FC = () => {
           <div className="text-[10px] text-slate-400 uppercase tracking-wider flex items-center gap-1">
             <UserCheck className="w-3 h-3 text-emerald-400" /> Known Subjects
           </div>
-          <div className="text-xl font-bold text-emerald-400 font-mono">{kpis.known_faces}</div>
+          <div className="text-xl font-bold text-emerald-400 font-mono">{liveKnownCount}</div>
           <div className="text-[9px] text-slate-500">Watchlist Matched</div>
         </div>
 
@@ -511,15 +524,15 @@ export const FaceView: React.FC = () => {
           <div className="text-[10px] text-slate-400 uppercase tracking-wider flex items-center gap-1">
             <UserX className="w-3 h-3 text-slate-400" /> Unknown Faces
           </div>
-          <div className="text-xl font-bold text-slate-200 font-mono">{kpis.unknown_faces}</div>
-          <div className="text-[9px] text-slate-500">Unrecognized Logs</div>
+          <div className="text-xl font-bold text-slate-200 font-mono">{liveUnknownCount}</div>
+          <div className="text-[9px] text-slate-500">Unrecognized Live</div>
         </div>
 
         <div className="bg-[#111622] p-3.5 rounded-xl border border-[#252d42] space-y-1">
           <div className="text-[10px] text-slate-400 uppercase tracking-wider flex items-center gap-1">
             <HelpCircle className="w-3 h-3 text-amber-400" /> Uncertain / Low Qual
           </div>
-          <div className="text-xl font-bold text-amber-400 font-mono">{kpis.uncertain_faces}</div>
+          <div className="text-xl font-bold text-amber-400 font-mono">{liveUncertainCount}</div>
           <div className="text-[9px] text-slate-500">Low Light / Angle</div>
         </div>
 
@@ -528,14 +541,14 @@ export const FaceView: React.FC = () => {
             <ShieldAlert className="w-3 h-3 text-red-400" /> Watchlist Matches
           </div>
           <div className="text-xl font-bold text-red-400 font-mono">{kpis.watchlist_matches}</div>
-          <div className="text-[9px] text-slate-500">High-Risk Alerts</div>
+          <div className="text-[9px] text-slate-500">Historical Archive</div>
         </div>
 
         <div className="bg-[#111622] p-3.5 rounded-xl border border-[#252d42] space-y-1">
           <div className="text-[10px] text-slate-400 uppercase tracking-wider flex items-center gap-1">
             <Shield className="w-3 h-3 text-purple-400" /> Enrolled Database
           </div>
-          <div className="text-xl font-bold text-purple-400 font-mono">{kpis.total_watchlist_enrolled}</div>
+          <div className="text-xl font-bold text-purple-400 font-mono">{watchlist.length || kpis.total_watchlist_enrolled}</div>
           <div className="text-[9px] text-slate-500">Total Enrolled Profiles</div>
         </div>
       </div>
@@ -579,9 +592,11 @@ export const FaceView: React.FC = () => {
                 latencyMs={activeCameraTelemetry?.latency_ms}
                 inferenceMode={activeCameraTelemetry?.inference_mode}
                 cameraRole={activeCamera?.role as any}
+                hideObjectDetections={true}
               />
             </div>
           </div>
+
 
           {/* Filter Bar */}
           <div className="bg-[#111622] p-4 rounded-xl border border-[#252d42]">

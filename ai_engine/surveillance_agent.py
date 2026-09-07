@@ -154,45 +154,28 @@ class AISurveillanceAgent:
 
     async def _process_face_intelligence(self, frame: np.ndarray, confirmed_objs: List[TrackedObject]) -> List[Dict[str, Any]]:
         """
-        Face Detection, Quality Filter, SFace Feature Embedding,
-        Watchlist Comparison, and College Security Verification Policy:
-          - VERIFIED (Student/Staff): Entry log created, NO ALARM.
-          - UNKNOWN (Unverified person): Security Alert created -> Alarm.
-          - WATCHLIST (Threat/Banned): Critical Alert created -> Immediate Alarm.
+        End-to-end Face Intelligence Pipeline:
+        LIVE FRAME → YuNet Face Detection → Landmark Alignment → Quality Filter
+        → SFace 128-d Feature Embedding → Watchlist Verification (Cosine Similarity)
+        → KNOWN / UNKNOWN / UNCERTAIN Classification → SQLite FaceDetection Persistence
+        → Watchlist Alert Generation with Deduplication.
         """
-        person_objs = [obj for obj in confirmed_objs if obj.class_name.lower() == "person"]
-        if not person_objs:
-            self.active_faces = []
-            return []
-
         now_sec = time.time()
+        # Sample face detection inference at ~5 Hz (every 200ms) to maintain optimal real-time performance
         if now_sec - self.last_face_process_time < 0.20 and self.active_faces:
             return self.active_faces
 
         self.last_face_process_time = now_sec
 
-        # Detect faces using YuNet in background thread
+        # 1. YuNet Face Detection directly on the live video frame (independent of YOLO object boxes)
         loop = asyncio.get_event_loop()
         detected_faces: List[DetectedFace] = await loop.run_in_executor(
             self._io_executor,
             lambda: self.face_engine.detect_faces(frame)
         )
 
-        # Spatial Filter: Correlate faces with detected person bounding boxes
-        valid_faces = []
-        for face in detected_faces:
-            fx, fy, fw, fh = face.bbox_norm
-            fcx = fx + fw / 2.0
-            fcy = fy + fh / 2.0
-            for p in person_objs:
-                px, py, pw, ph = p.bbox
-                margin_x = pw * 0.20
-                margin_y = ph * 0.20
-                if (px - margin_x <= fcx <= px + pw + margin_x) and (py - margin_y <= fcy <= py + ph * 0.70):
-                    valid_faces.append(face)
-                    break
-
-        confirmed_tracks: List[FaceTrack] = self.face_tracker.update(valid_faces)
+        # 2. Multi-Frame Spatial Face Tracking
+        confirmed_tracks: List[FaceTrack] = self.face_tracker.update(detected_faces)
         if not confirmed_tracks:
             self.active_faces = []
             return []
@@ -209,6 +192,7 @@ class AISurveillanceAgent:
 
             faces_payload = []
             for track in confirmed_tracks:
+                # 3. SFace Feature Extraction & Watchlist Comparison
                 track = self.face_engine.evaluate_track_recognition(frame, track, watchlist_records)
 
                 is_known = (track.recognition_status == "KNOWN" and track.identity_name is not None)
@@ -219,6 +203,7 @@ class AISurveillanceAgent:
                 is_verified_student_staff = is_known and (p_cat in VERIFIED_CATEGORIES)
                 is_threat_watchlist = is_known and (p_cat in THREAT_CATEGORIES)
                 is_unknown_person = not is_known
+                is_uncertain = (track.recognition_status == "UNCERTAIN") or (not getattr(track, "is_high_quality", True) and track.quality_score < 0.35)
 
                 face_data = {
                     "track_id": track.track_id,
@@ -226,7 +211,7 @@ class AISurveillanceAgent:
                     "landmarks": track.landmarks,
                     "confidence": track.confidence,
                     "quality_score": track.quality_score,
-                    "recognition_status": "VERIFIED" if is_verified_student_staff else "KNOWN" if is_threat_watchlist else "UNKNOWN",
+                    "recognition_status": "VERIFIED" if is_verified_student_staff else "KNOWN" if is_threat_watchlist else "UNCERTAIN" if is_uncertain else "UNKNOWN",
                     "identity_id": track.identity_id,
                     "identity_name": track.identity_name if is_known else "UNKNOWN / VERIFICATION REQUIRED",
                     "person_id": p_badge if is_known else None,
@@ -236,43 +221,33 @@ class AISurveillanceAgent:
                 }
                 faces_payload.append(face_data)
 
-                is_uncertain = (track.recognition_status == "UNCERTAIN") or (not getattr(track, "is_high_quality", True) and track.quality_score < 0.35)
-
-                # ── Per-track FaceDetection DB record throttle ────────────────────────
-                # Controls how often we write a FaceDetection row and save a new snapshot.
-                # This is separate from alert creation (which is strictly one-per-track).
-                # Check suppression cache (if operator recently deleted detection for this track or identity)
+                # ── Per-track FaceDetection DB record throttle & deduplication ────────
+                # Check suppression cache (if operator recently deleted detection for this specific track_id or specific identity)
                 track_face_suppressed = (
                     self.suppressed_face_keys.get((self.camera_id, track.track_id), 0) > now_sec or
-                    (is_known and self.suppressed_face_keys.get((self.camera_id, track.identity_name), 0) > now_sec) or
-                    (not is_known and self.suppressed_face_keys.get((self.camera_id, "UNKNOWN"), 0) > now_sec)
+                    (is_known and track.identity_name and self.suppressed_face_keys.get((self.camera_id, track.identity_name), 0) > now_sec)
                 )
                 if track_face_suppressed:
                     continue
 
-                if is_verified_student_staff:
-                    fd_dedup_key = (self.camera_id, track.track_id, str(p_badge), "STUDENT_VERIFIED")
-                    fd_cooldown = 60.0
-                elif is_threat_watchlist:
-                    fd_dedup_key = (self.camera_id, track.track_id, str(p_badge), "FACE_WATCHLIST_MATCH")
-                    fd_cooldown = 30.0
-                elif is_uncertain:
-                    fd_dedup_key = (self.camera_id, track.track_id, "UNCERTAIN", "UNCERTAIN_FACE")
-                    fd_cooldown = 60.0
-                else:
-                    fd_dedup_key = (self.camera_id, track.track_id, "UNKNOWN", "UNKNOWN_PERSON_DETECTED")
-                    fd_cooldown = FACE_RECORD_COOLDOWN_SEC
+                track_key = (self.camera_id, track.track_id)
+                prev_status = getattr(track, "_last_db_status", None)
+                is_first_save = not getattr(track, "_has_db_record", False)
+                status_changed = (prev_status is not None and prev_status != track.recognition_status)
+                time_since_save = now_sec - self.last_face_db_record_times.get(track_key, 0)
+                cooldown_passed = (time_since_save >= FACE_RECORD_COOLDOWN_SEC)
 
-                face_ident_key = (self.camera_id, track.identity_name if is_known else "UNKNOWN")
-                time_since_ident = now_sec - self.last_face_db_record_times.get(face_ident_key, 0)
-
-                do_fd_record = (
-                    (now_sec - self.last_face_db_record_times.get(fd_dedup_key, 0)) >= fd_cooldown and
-                    time_since_ident >= min(fd_cooldown, 30.0)
-                )
+                # Persist new database record when:
+                # 1. A new face track appears (first time seen)
+                # 2. Recognition status changes (e.g. UNKNOWN -> KNOWN)
+                # 3. Track returns after absence (new track_id)
+                # 4. Configured cooldown interval (FACE_RECORD_COOLDOWN_SEC) has elapsed
+                do_fd_record = is_first_save or status_changed or cooldown_passed
                 if do_fd_record:
-                    self.last_face_db_record_times[fd_dedup_key] = now_sec
-                    self.last_face_db_record_times[face_ident_key] = now_sec
+                    track._has_db_record = True
+                    track._last_db_status = track.recognition_status
+                    self.last_face_db_record_times[track_key] = now_sec
+
 
 
                     # Offload crop and snapshot saving to background thread
@@ -766,7 +741,7 @@ class AISurveillanceAgent:
                             "identity_name": track.identity_name,
                             "person_id": p_badge if is_known else None,
                             "category": p_cat if is_known else "UNKNOWN",
-                            "recognition_status": "VERIFIED" if is_verified_student_staff else "KNOWN" if is_threat_watchlist else "UNKNOWN",
+                            "recognition_status": "VERIFIED" if is_verified_student_staff else "KNOWN" if is_threat_watchlist else "UNCERTAIN" if is_uncertain else "UNKNOWN",
                             "detection_confidence": track.confidence,
                             "recognition_confidence": track.recognition_confidence,
                             "crop_url": crop_url,

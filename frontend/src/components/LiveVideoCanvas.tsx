@@ -33,6 +33,7 @@ interface LiveVideoCanvasProps {
   latencyMs?: number;
   inferenceMode?: string;
   cameraRole?: 'primary' | 'secondary';
+  hideObjectDetections?: boolean;
 }
 
 export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
@@ -43,7 +44,8 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
   fps = 0.0,
   latencyMs = 0.0,
   inferenceMode,
-  cameraRole
+  cameraRole,
+  hideObjectDetections = false
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [thermalMode, setThermalMode] = useState<boolean>(false);
@@ -187,59 +189,61 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       }
 
       if (isStreaming) {
-        // A. General Object Bounding Boxes
-        (detections || []).forEach((det) => {
-          const [nx, ny, nw, nh] = det.bbox;
-          const bx = nx * w;
-          const by = ny * h;
-          const bw = nw * w;
-          const bh = nh * h;
+        // A. General Object Bounding Boxes (suppressed on dedicated Face Intelligence page)
+        if (!hideObjectDetections) {
+          (detections || []).forEach((det) => {
+            const [nx, ny, nw, nh] = det.bbox;
+            const bx = nx * w;
+            const by = ny * h;
+            const bw = nw * w;
+            const bh = nh * h;
 
-          const cls = (det.class_name || '').toLowerCase().trim();
-          const isPerson = cls === 'person';
-          const isVehicle = ['car', 'truck', 'lorry', 'bus', 'motorcycle', 'bicycle', 'van'].includes(cls);
-          const isDrone = cls === 'drone';
+            const cls = (det.class_name || '').toLowerCase().trim();
+            const isPerson = cls === 'person';
+            const isVehicle = ['car', 'truck', 'lorry', 'bus', 'motorcycle', 'bicycle', 'van'].includes(cls);
+            const isDrone = cls === 'drone';
 
-          const trackPrefix = isPerson ? 'P' : isVehicle ? 'V' : isDrone ? 'D' : 'O';
-          const displayLabel = (cls === 'truck' || cls === 'lorry')
-            ? 'TRUCK'
-            : cls === 'cell phone'
-            ? 'PHONE'
-            : cls ? cls.toUpperCase() : 'OBJECT';
+            const trackPrefix = isPerson ? 'P' : isVehicle ? 'V' : isDrone ? 'D' : 'O';
+            const displayLabel = (cls === 'truck' || cls === 'lorry')
+              ? 'TRUCK'
+              : cls === 'cell phone'
+              ? 'PHONE'
+              : cls ? cls.toUpperCase() : 'OBJECT';
 
-          const boxColor =
-            isPerson ? '#38bdf8' :
-            (cls === 'bus' || cls === 'truck') ? '#f59e0b' :
-            cls === 'car' ? '#10b981' :
-            isVehicle ? '#3b82f6' :
-            isDrone ? '#ec4899' :
-            '#94a3b8';
+            const boxColor =
+              isPerson ? '#38bdf8' :
+              (cls === 'bus' || cls === 'truck') ? '#f59e0b' :
+              cls === 'car' ? '#10b981' :
+              isVehicle ? '#3b82f6' :
+              isDrone ? '#ec4899' :
+              '#94a3b8';
 
-          ctx.strokeStyle = boxColor;
-          ctx.lineWidth = 2;
-          ctx.strokeRect(bx, by, bw, bh);
+            ctx.strokeStyle = boxColor;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(bx, by, bw, bh);
 
-          const len = 8;
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.moveTo(bx, by + len); ctx.lineTo(bx, by); ctx.lineTo(bx + len, by); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(bx + bw - len, by); ctx.lineTo(bx + bw, by); ctx.lineTo(bx + bw, by + len); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(bx, by + bh - len); ctx.lineTo(bx, by + bh); ctx.lineTo(bx + len, by + bh); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(bx + bw - len, by + bh); ctx.lineTo(bx + bw, by + bh); ctx.lineTo(bx + bw, by + bh - len); ctx.stroke();
+            const len = 8;
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(bx, by + len); ctx.lineTo(bx, by); ctx.lineTo(bx + len, by); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(bx + bw - len, by); ctx.lineTo(bx + bw, by); ctx.lineTo(bx + bw, by + len); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(bx, by + bh - len); ctx.lineTo(bx, by + bh); ctx.lineTo(bx + len, by + bh); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(bx + bw - len, by + bh); ctx.lineTo(bx + bw, by + bh); ctx.lineTo(bx + bw, by + bh - len); ctx.stroke();
 
-          const movementSuffix = det.movement_state && det.movement_state !== 'STATIONARY'
-            ? ` • ${det.movement_state}${det.direction && det.direction !== 'STATIONARY' ? ' ' + det.direction : ''}`
-            : '';
-          const labelText = `${trackPrefix}-${det.track_id} | ${displayLabel} | ${(det.confidence * 100).toFixed(0)}%${movementSuffix}`;
-          ctx.font = 'bold 11px monospace';
-          const textWidth = ctx.measureText(labelText).width;
+            const movementSuffix = det.movement_state && det.movement_state !== 'STATIONARY'
+              ? ` • ${det.movement_state}${det.direction && det.direction !== 'STATIONARY' ? ' ' + det.direction : ''}`
+              : '';
+            const labelText = `${trackPrefix}-${det.track_id} | ${displayLabel} | ${(det.confidence * 100).toFixed(0)}%${movementSuffix}`;
+            ctx.font = 'bold 11px monospace';
+            const textWidth = ctx.measureText(labelText).width;
 
-          ctx.fillStyle = boxColor;
-          ctx.fillRect(bx, by - 20, textWidth + 8, 20);
+            ctx.fillStyle = boxColor;
+            ctx.fillRect(bx, by - 20, textWidth + 8, 20);
 
-          ctx.fillStyle = '#0f172a';
-          ctx.fillText(labelText, bx + 4, by - 6);
-        });
+            ctx.fillStyle = '#0f172a';
+            ctx.fillText(labelText, bx + 4, by - 6);
+          });
+        }
 
         // B. Face Bounding Boxes with College Security Badges
         (faces || []).forEach((face: any) => {

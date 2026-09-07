@@ -5,7 +5,7 @@ from pathlib import Path
 from backend.auth import create_access_token
 
 BASE_URL = "http://127.0.0.1:8000"
-DB_PATH = str(Path(__file__).parent / "ibvap.db")
+DB_PATH = str(Path(__file__).parent.parent / "ibvap.db")
 
 def get_auth_token():
     return create_access_token(data={"sub": "admin"})
