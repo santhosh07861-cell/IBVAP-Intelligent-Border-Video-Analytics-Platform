@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Shield, Lock, User, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Shield, Lock, User, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 export const Login: React.FC = () => {
@@ -90,42 +90,22 @@ export const Login: React.FC = () => {
           </button>
         </form>
 
-        {/* Demo Roles Quick Login Buttons */}
+        {/* Admin Quick Login */}
         <div className="mt-6 pt-6 border-t border-[#252d42]">
-          <p className="text-[11px] font-mono text-slate-400 mb-2 uppercase text-center">QUICK DEMO CREDENTIALS (SIH EVALUATION)</p>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <button
-              onClick={() => handleQuickLogin('admin', 'Admin Pass123!')}
-              className="p-2 bg-[#1a2030] hover:bg-blue-900/30 border border-[#252d42] rounded text-left transition-colors"
-            >
-              <div className="font-semibold text-blue-400">Administrator</div>
+          <p className="text-[11px] font-mono text-slate-400 mb-2 uppercase text-center">DEFAULT ADMIN CREDENTIALS</p>
+          <button
+            type="button"
+            onClick={() => handleQuickLogin('admin', 'Admin Pass123!')}
+            className="w-full p-2.5 bg-[#1a2030] hover:bg-blue-900/30 border border-blue-500/30 rounded-lg text-left transition-colors flex items-center justify-between"
+          >
+            <div>
+              <div className="font-semibold text-blue-400 text-xs">Administrator</div>
               <div className="text-[10px] text-slate-400 font-mono">admin / Admin Pass123!</div>
-            </button>
-
-            <button
-              onClick={() => handleQuickLogin('operator', 'Operator Pass123!')}
-              className="p-2 bg-[#1a2030] hover:bg-emerald-900/30 border border-[#252d42] rounded text-left transition-colors"
-            >
-              <div className="font-semibold text-emerald-400">Security Operator</div>
-              <div className="text-[10px] text-slate-400 font-mono">operator / Operator Pass123!</div>
-            </button>
-
-            <button
-              onClick={() => handleQuickLogin('analyst', 'Analyst Pass123!')}
-              className="p-2 bg-[#1a2030] hover:bg-purple-900/30 border border-[#252d42] rounded text-left transition-colors"
-            >
-              <div className="font-semibold text-purple-400">Analyst</div>
-              <div className="text-[10px] text-slate-400 font-mono">analyst / Analyst Pass123!</div>
-            </button>
-
-            <button
-              onClick={() => handleQuickLogin('viewer', 'Viewer Pass123!')}
-              className="p-2 bg-[#1a2030] hover:bg-amber-900/30 border border-[#252d42] rounded text-left transition-colors"
-            >
-              <div className="font-semibold text-amber-400">Viewer</div>
-              <div className="text-[10px] text-slate-400 font-mono">viewer / Viewer Pass123!</div>
-            </button>
-          </div>
+            </div>
+            <div className="text-[10px] font-mono text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
+              AUTO-FILL
+            </div>
+          </button>
         </div>
       </div>
     </div>
