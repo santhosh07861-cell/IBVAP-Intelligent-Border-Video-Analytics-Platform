@@ -50,8 +50,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: 'Invalid username or password.' };
       }
 
+      if (res.status === 404) {
+        return {
+          success: false,
+          error: 'Backend API server not found (404). Netlify only hosts the frontend — please ensure the Python FastAPI backend is running and connected.'
+        };
+      }
+
       const errText = await res.text();
-      return { success: false, error: `Server error (${res.status}): ${errText || res.statusText}` };
+      const cleanErr = errText.trim().startsWith('<')
+        ? 'Server returned an invalid response. Please verify backend connection.'
+        : errText;
+
+      return { success: false, error: `Server error (${res.status}): ${cleanErr || res.statusText}` };
     } catch (e) {
       console.error("Login failed:", e);
       return { success: false, error: 'Cannot connect to backend server (port 8000). Please ensure python backend is running.' };
