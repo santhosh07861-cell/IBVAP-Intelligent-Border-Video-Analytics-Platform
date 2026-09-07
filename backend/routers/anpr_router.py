@@ -183,7 +183,7 @@ def get_anpr_stats(
 
 
 @router.get("/snapshots/{filename}")
-def serve_anpr_snapshot(filename: str, current_user=Depends(get_current_user)):
+def serve_anpr_snapshot(filename: str):
     """Serve ANPR evidence snapshot images from storage/evidence/anpr/snapshots/."""
     # Security: strip path traversal
     safe_filename = os.path.basename(filename)

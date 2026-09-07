@@ -12,7 +12,7 @@ from ai_engine.detection.real_ai_detector import (
 )
 from ai_engine.tracking.tracker import MultiObjectTracker, TrackedObject
 from ai_engine.face.real_face_engine import RealFaceEngine, FaceTracker, FaceTrack, DetectedFace
-from ai_engine.anpr.anpr_engine import ANPREngine, save_anpr_evidence_snapshot
+from ai_engine.anpr.anpr_engine import ANPREngine, save_anpr_evidence_snapshot, VEHICLE_TYPE_MAP, VEHICLE_CLASSES
 from event_engine.risk.scorer import OperationalRiskScorer
 from storage.evidence_manager import EvidenceManager
 from database.connection import SessionLocal
@@ -85,6 +85,7 @@ class AISurveillanceAgent:
         self.last_face_process_time = 0.0
         self.last_anpr_process_times: Dict[Tuple[str, int], float] = {}
         self.last_anpr_db_times: Dict[Tuple[str, str], float] = {}
+        self.vehicle_record_state: Dict[Tuple[str, int], Dict[str, Any]] = {}
         self.last_face_db_record_times: Dict[Tuple[str, int, str, str], float] = {}
         self.active_faces: List[Dict[str, Any]] = []
         self.active_anpr: List[Dict[str, Any]] = []
@@ -121,8 +122,12 @@ class AISurveillanceAgent:
         self.last_detection_snapshot_times.clear()
         self.last_anpr_process_times.clear()
         self.last_anpr_db_times.clear()
+        self.vehicle_record_state.clear()
+        if hasattr(self.anpr_engine, 'tracker') and hasattr(self.anpr_engine.tracker, '_tracks'):
+            with self.anpr_engine.tracker._lock:
+                self.anpr_engine.tracker._tracks.clear()
         self.last_face_process_time = 0.0
-        logger.info(f"[CAMERA_CLEANUP] Live surveillance & face session reset for camera={self.camera_id}")
+        logger.info(f"[CAMERA_CLEANUP] Live surveillance, vehicle ANPR & face session reset for camera={self.camera_id}")
 
     async def process_frame(self, frame: np.ndarray, loop_start_time: float, pre_frame: Optional[np.ndarray] = None) -> Tuple[List[TrackedObject], float, float, List[Dict[str, Any]], List[Dict[str, Any]]]:
         if frame is None or frame.size == 0:
@@ -787,7 +792,12 @@ class AISurveillanceAgent:
 
     async def _process_anpr_intelligence(self, frame: np.ndarray, vehicle_objs: List[TrackedObject]) -> None:
         """
-        ANPR pipeline executed for confirmed vehicle tracks.
+        Vehicle Intelligence & ANPR pipeline executed for confirmed vehicle tracks.
+        1. Classifies vehicle into accurate standard vehicle type (CAR, MOTORCYCLE, BUS, TRUCK, VAN, BICYCLE, etc.).
+        2. Detects license plate region & runs OCR via EasyOCR.
+        3. Persists vehicle detection record in SQLite `anpr_results` linked with camera_id, location, timestamp, vehicle_type, detection_confidence, track_id, license_plate, ocr_confidence, and evidence snapshot.
+        4. If plate is unreadable/uncertain, stores as "UNKNOWN / UNREADABLE" with ocr_confidence = 0.0 (never invent fake plates).
+        5. Stabilizes results across frames: updates existing database record when higher confidence plate OCR arrives for the same track.
         """
         if frame is None or frame.size == 0:
             return
@@ -798,9 +808,14 @@ class AISurveillanceAgent:
 
         for obj in vehicle_objs:
             track_key = (self.camera_id, obj.track_id)
-            if now_sec - self.last_anpr_process_times.get(track_key, 0) < 1.0:
+            # Throttle inference per track (~0.5s) to avoid redundant OCR computation on every video frame
+            if now_sec - self.last_anpr_process_times.get(track_key, 0) < 0.50:
                 continue
             self.last_anpr_process_times[track_key] = now_sec
+
+            # Accurate vehicle classification from AI model
+            raw_class = (obj.class_name or "").lower().strip()
+            vehicle_type = VEHICLE_TYPE_MAP.get(raw_class, raw_class.upper() if raw_class else "CAR")
 
             vx = max(0, int(obj.bbox[0] * fw))
             vy = max(0, int(obj.bbox[1] * fh))
@@ -811,6 +826,7 @@ class AISurveillanceAgent:
             if vehicle_crop.size == 0:
                 continue
 
+            anpr_result = None
             try:
                 anpr_result = await loop.run_in_executor(
                     self._io_executor,
@@ -820,38 +836,55 @@ class AISurveillanceAgent:
                 )
             except Exception as e:
                 logger.error(f"[ANPR] process_vehicle_crop error on {self.camera_id}: {e}")
-                continue
 
-            if not anpr_result:
-                continue
-
-            ocr_text = anpr_result["ocr_text"]
-            ocr_conf = anpr_result["ocr_confidence"]
-
-            self.active_anpr = [a for a in self.active_anpr if a.get("track_id") != obj.track_id]
-            self.active_anpr.append({
-                "track_id": obj.track_id,
-                "vehicle_type": obj.class_name.upper(),
-                "bbox": obj.bbox,
-                "plate_text": ocr_text,
-                "ocr_confidence": ocr_conf,
-                "status": "READING",
-            })
-
-            if not anpr_result.get("just_confirmed"):
-                continue
-
+            # Get best multi-frame stabilized OCR result from tracker
             plate_text, avg_conf, is_valid = self.anpr_engine.tracker.get_best_result(
                 self.camera_id, obj.track_id
             )
-            status = "CONFIRMED" if (plate_text != "PLATE UNCERTAIN" and avg_conf >= 0.60) else "UNCERTAIN"
 
-            dedup_key = (self.camera_id, plate_text)
-            if now_sec - self.last_anpr_db_times.get(dedup_key, 0) < ANPR_DUPLICATE_COOLDOWN_SEC:
-                continue
-            self.last_anpr_db_times[dedup_key] = now_sec
-            self.anpr_engine.tracker.reset_confirmed(self.camera_id, obj.track_id)
+            # Determine plate string, confidence and status
+            if plate_text and plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE"] and avg_conf >= 0.40:
+                final_plate = plate_text
+                final_ocr_conf = avg_conf
+                status = "CONFIRMED"
+            else:
+                final_plate = "UNKNOWN / UNREADABLE"
+                final_ocr_conf = 0.0
+                status = "UNCERTAIN"
 
+            plate_bbox_in_vehicle = anpr_result.get("plate_bbox_norm") if anpr_result else None
+
+            # Update live in-memory active ANPR state for UI HUD
+            self.active_anpr = [a for a in self.active_anpr if a.get("track_id") != obj.track_id]
+            self.active_anpr.append({
+                "track_id": obj.track_id,
+                "vehicle_type": vehicle_type,
+                "bbox": obj.bbox,
+                "plate_text": final_plate,
+                "ocr_confidence": final_ocr_conf,
+                "status": status,
+            })
+
+            # Check if we have already recorded this track in the database
+            existing_record = self.vehicle_record_state.get(track_key)
+
+            # If existing record exists and plate has NOT improved, skip redundant DB updates
+            if existing_record:
+                prev_plate = existing_record.get("plate_number")
+                prev_conf = existing_record.get("ocr_confidence", 0.0)
+                # Check if we have a meaningful improvement:
+                # 1. Previous was unreadable and now we have a recognized plate
+                # 2. Previous had lower OCR confidence and now confidence is higher by >= 0.05
+                is_improved = False
+                if prev_plate == "UNKNOWN / UNREADABLE" and final_plate != "UNKNOWN / UNREADABLE":
+                    is_improved = True
+                elif final_plate != "UNKNOWN / UNREADABLE" and final_ocr_conf > (prev_conf + 0.05):
+                    is_improved = True
+
+                if not is_improved:
+                    continue
+
+            # DB persistence logic (Insert new OR Update existing)
             db = SessionLocal()
             try:
                 cam = db.query(Camera).filter(
@@ -861,242 +894,281 @@ class AISurveillanceAgent:
                 cam_num = cam.camera_id if cam else self.camera_id
                 cam_name = cam.name if cam else "Campus Surveillance Camera"
                 cam_loc = cam.location or "Gate 1 Main Entry" if cam else "Gate 1 Main Entry"
-                vehicle_type = obj.class_name.upper()
 
-                plate_bbox_in_vehicle = anpr_result.get("plate_bbox_norm")
+                # Check Watchlist match if plate is valid
+                is_watchlist = False
+                watchlist_entry = None
+                if final_plate != "UNKNOWN / UNREADABLE":
+                    watchlist_entry = db.query(ANPRWatchlist).filter(
+                        ANPRWatchlist.plate_number == final_plate,
+                        ANPRWatchlist.is_active == True
+                    ).first()
+                    is_watchlist = watchlist_entry is not None
+
+                final_status = "WATCHLIST_MATCH" if is_watchlist else status
+
+                # Generate tactical evidence snapshot
                 saved = await loop.run_in_executor(
                     self._io_executor,
                     lambda: save_anpr_evidence_snapshot(
                         frame=frame.copy(),
                         vehicle_bbox=obj.bbox,
                         plate_bbox_in_vehicle=plate_bbox_in_vehicle,
-                        plate_text=plate_text,
+                        plate_text=final_plate,
                         vehicle_type=vehicle_type,
-                        ocr_confidence=avg_conf,
+                        ocr_confidence=final_ocr_conf,
                         detection_confidence=obj.confidence,
                         camera_id=cam_num,
                         camera_name=cam_name,
                         camera_location=cam_loc,
                         track_id=obj.track_id,
-                        status=status,
+                        status=final_status,
                     )
                 )
-
                 snap_path, snap_url, snap_size = saved if saved else (None, None, 0)
 
-                is_watchlist = False
-                watchlist_entry = None
-                if plate_text != "PLATE UNCERTAIN":
-                    watchlist_entry = db.query(ANPRWatchlist).filter(
-                        ANPRWatchlist.plate_number == plate_text,
-                        ANPRWatchlist.is_active == True
-                    ).first()
-                    is_watchlist = watchlist_entry is not None
-
-                anpr_rec = ANPRResult(
-                    id=str(uuid.uuid4()),
-                    camera_id=cam_id,
-                    plate_number=plate_text,
-                    vehicle_type=vehicle_type,
-                    vehicle_track_id=obj.track_id,
-                    camera_name=cam_name,
-                    camera_location=cam_loc,
-                    detection_confidence=round(obj.confidence, 3),
-                    ocr_confidence=round(avg_conf, 3),
-                    plate_bbox=plate_bbox_in_vehicle,
-                    vehicle_bbox=obj.bbox,
-                    snapshot_url=snap_url,
-                    crop_url=None,
-                    status="WATCHLIST_MATCH" if is_watchlist else status,
-                    is_watchlist_match=is_watchlist,
-                    timestamp=datetime.utcnow(),
-                    created_at=datetime.utcnow(),
-                )
-                db.add(anpr_rec)
-                db.commit()
-
-                await self.ws_manager.broadcast({
-                    "type": "ANPR_DETECTION",
-                    "anpr_id": anpr_rec.id,
-                    "camera_id": cam_id,
-                    "camera_number": cam_num,
-                    "camera_name": cam_name,
-                    "location": cam_loc,
-                    "plate_number": plate_text,
-                    "vehicle_type": vehicle_type,
-                    "vehicle_track_id": obj.track_id,
-                    "detection_confidence": round(obj.confidence, 3),
-                    "ocr_confidence": round(avg_conf, 3),
-                    "status": anpr_rec.status,
-                    "is_watchlist_match": is_watchlist,
-                    "snapshot_url": snap_url,
-                    "evidence_url": snap_url,
-                    "timestamp": anpr_rec.timestamp.isoformat(),
-                })
-
-                if is_watchlist and watchlist_entry:
-                    severity = watchlist_entry.severity or "HIGH"
-                    risk_score = 95.0 if severity == "CRITICAL" else 80.0
-                    now_dt = datetime.utcnow()
-                    ts_str = f"{now_dt.isoformat()}Z"
-
-                    ev = Event(
+                if existing_record:
+                    # UPDATE EXISTING RECORD IN-PLACE
+                    rec_id = existing_record["record_id"]
+                    anpr_rec = db.query(ANPRResult).filter(ANPRResult.id == rec_id).first()
+                    if anpr_rec:
+                        anpr_rec.plate_number = final_plate
+                        anpr_rec.vehicle_type = vehicle_type
+                        anpr_rec.detection_confidence = round(obj.confidence, 3)
+                        anpr_rec.ocr_confidence = round(final_ocr_conf, 3)
+                        anpr_rec.status = final_status
+                        anpr_rec.is_watchlist_match = is_watchlist
+                        if plate_bbox_in_vehicle:
+                            anpr_rec.plate_bbox = plate_bbox_in_vehicle
+                        if snap_url:
+                            anpr_rec.snapshot_url = snap_url
+                        db.commit()
+                        logger.info(f"[ANPR] Updated existing vehicle track record {rec_id}: plate={final_plate} vtype={vehicle_type} conf={final_ocr_conf:.2f}")
+                    else:
+                        anpr_rec = None
+                else:
+                    # INSERT NEW RECORD
+                    anpr_rec = ANPRResult(
                         id=str(uuid.uuid4()),
                         camera_id=cam_id,
-                        event_type="ANPR_WATCHLIST_MATCH",
-                        severity=severity,
-                        risk_score=risk_score,
-                        confidence=avg_conf,
-                        details={
-                            "plate_number": plate_text,
-                            "vehicle_type": vehicle_type,
-                            "track_id": f"V-{obj.track_id}",
-                            "reason": watchlist_entry.reason or "Vehicle on security watchlist",
-                            "camera_name": cam_name,
-                            "camera_location": cam_loc,
-                            "ocr_confidence": avg_conf,
-                            "timestamp": ts_str,
-                        },
-                        timestamp=now_dt,
-                        track_id=obj.track_id,
+                        plate_number=final_plate,
+                        vehicle_type=vehicle_type,
+                        vehicle_track_id=obj.track_id,
+                        camera_name=cam_name,
+                        camera_location=cam_loc,
+                        detection_confidence=round(obj.confidence, 3),
+                        ocr_confidence=round(final_ocr_conf, 3),
+                        plate_bbox=plate_bbox_in_vehicle,
+                        vehicle_bbox=obj.bbox,
+                        snapshot_url=snap_url,
+                        crop_url=None,
+                        status=final_status,
+                        is_watchlist_match=is_watchlist,
+                        timestamp=datetime.utcnow(),
+                        created_at=datetime.utcnow(),
                     )
-                    db.add(ev)
-
-                    al = Alert(
-                        id=str(uuid.uuid4()),
-                        camera_id=cam_id,
-                        event_id=ev.id,
-                        event_type="ANPR_WATCHLIST_MATCH",
-                        severity=severity,
-                        risk_score=risk_score,
-                        confidence=avg_conf,
-                        status="NEW",
-                        evidence_url=snap_url,
-                        timestamp=now_dt,
-                        track_id=obj.track_id,
-                        location=cam_loc,
-                        details={
-                            "plate_number": plate_text,
-                            "vehicle_type": vehicle_type,
-                            "track_id": f"V-{obj.track_id}",
-                            "reason": watchlist_entry.reason or "Vehicle on security watchlist",
-                            "camera_name": cam_name,
-                            "location": cam_loc,
-                            "timestamp": ts_str,
-                        }
-                    )
-                    db.add(al)
-
-                    inc_num = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
-                    inc_anpr = Incident(
-                        id=str(uuid.uuid4()),
-                        incident_number=inc_num,
-                        camera_id=cam_id,
-                        alert_id=al.id,
-                        title=f"{severity} WATCHLIST VEHICLE — {plate_text}",
-                        description=f"Blacklisted vehicle with license plate '{plate_text}' ({vehicle_type}) detected at {cam_name}. Reason: {watchlist_entry.reason or 'Security Watchlist'}",
-                        severity=severity,
-                        risk_score=risk_score,
-                        status="NEW",
-                        related_event_ids=[ev.id],
-                        start_time=now_dt,
-                        created_at=now_dt,
-                    )
-                    db.add(inc_anpr)
-                    al.incident_id = inc_anpr.id
-
-                    if snap_path:
-                        ev_evidence_anpr = Evidence(
-                            id=str(uuid.uuid4()),
-                            incident_id=inc_anpr.id,
-                            camera_id=cam_id,
-                            evidence_type="snapshot",
-                            file_path=snap_path,
-                            file_url=snap_url,
-                            file_size_bytes=snap_size,
-                            metadata_json={
-                                "alert_id": al.id,
-                                "event_id": ev.id,
-                                "plate_number": plate_text,
-                                "timestamp": ts_str,
-                            },
-                            created_at=now_dt,
-                        )
-                        db.add(ev_evidence_anpr)
-
+                    db.add(anpr_rec)
                     db.commit()
+                    logger.info(f"[ANPR] Created vehicle detection record {anpr_rec.id}: plate={final_plate} vtype={vehicle_type} det_conf={obj.confidence:.2f}")
 
+                if anpr_rec:
+                    # Cache vehicle record state for multi-frame deduplication and progressive updates
+                    self.vehicle_record_state[track_key] = {
+                        "record_id": anpr_rec.id,
+                        "plate_number": final_plate,
+                        "ocr_confidence": final_ocr_conf,
+                        "vehicle_type": vehicle_type,
+                        "status": final_status,
+                        "snapshot_url": snap_url or anpr_rec.snapshot_url,
+                        "is_watchlist": is_watchlist,
+                        "last_updated": now_sec,
+                    }
+
+                    # Broadcast real-time ANPR_DETECTION WebSocket event
                     await self.ws_manager.broadcast({
-                        "type": "ALERT_NEW",
-                        "alert_id": al.id,
-                        "event_id": ev.id,
-                        "incident_id": inc_anpr.id,
-                        "incident_number": inc_anpr.incident_number,
+                        "type": "ANPR_DETECTION",
+                        "anpr_id": anpr_rec.id,
+                        "id": anpr_rec.id,
                         "camera_id": cam_id,
                         "camera_number": cam_num,
                         "camera_name": cam_name,
                         "location": cam_loc,
-                        "object_class": "vehicle",
-                        "track_id": f"V-{obj.track_id}",
-                        "confidence": avg_conf,
-                        "event_type": "ANPR_WATCHLIST_MATCH",
-                        "alert_title": f"🚨 WATCHLIST VEHICLE — {plate_text}",
-                        "plate_number": plate_text,
+                        "plate_number": final_plate,
                         "vehicle_type": vehicle_type,
-                        "severity": severity,
-                        "risk_score": risk_score,
-                        "evidence_url": snap_url,
-                        "timestamp": ts_str,
-                        "alert": {
-                            "id": al.id,
-                            "camera_id": cam_id,
-                            "camera_number": cam_num,
-                            "camera_name": cam_name,
-                            "location": cam_loc,
-                            "plate_number": plate_text,
-                            "vehicle_type": vehicle_type,
-                            "event_type": "ANPR_WATCHLIST_MATCH",
-                            "alert_title": f"🚨 WATCHLIST VEHICLE — {plate_text}",
-                            "severity": severity,
-                            "risk_score": risk_score,
-                            "evidence_url": snap_url,
-                            "timestamp": ts_str,
-                        }
+                        "vehicle_track_id": obj.track_id,
+                        "detection_confidence": round(obj.confidence, 3),
+                        "ocr_confidence": round(final_ocr_conf, 3),
+                        "status": anpr_rec.status,
+                        "is_watchlist_match": is_watchlist,
+                        "snapshot_url": snap_url or anpr_rec.snapshot_url,
+                        "evidence_url": snap_url or anpr_rec.snapshot_url,
+                        "timestamp": anpr_rec.timestamp.isoformat(),
                     })
 
-                    await self.ws_manager.broadcast({
-                        "type": "INCIDENT_NEW",
-                        "incident_id": inc_anpr.id,
-                        "incident_number": inc_anpr.incident_number,
-                        "event_id": ev.id,
-                        "alert_id": al.id,
-                        "camera_id": cam_id,
-                        "camera_number": cam_num,
-                        "camera_name": cam_name,
-                        "location": cam_loc,
-                        "title": inc_anpr.title,
-                        "description": inc_anpr.description,
-                        "severity": severity,
-                        "risk_score": risk_score,
-                        "status": inc_anpr.status,
-                        "timestamp": ts_str,
-                        "created_at": ts_str,
-                        "evidence_url": snap_url,
-                        "incident": {
-                            "id": inc_anpr.id,
+                    # If Watchlist match detected on this frame (and not previously alerted for this track)
+                    if is_watchlist and watchlist_entry and not existing_record:
+                        severity = watchlist_entry.severity or "HIGH"
+                        risk_score = 95.0 if severity == "CRITICAL" else 80.0
+                        now_dt = datetime.utcnow()
+                        ts_str = f"{now_dt.isoformat()}Z"
+
+                        ev = Event(
+                            id=str(uuid.uuid4()),
+                            camera_id=cam_id,
+                            event_type="ANPR_WATCHLIST_MATCH",
+                            severity=severity,
+                            risk_score=risk_score,
+                            confidence=final_ocr_conf,
+                            details={
+                                "plate_number": final_plate,
+                                "vehicle_type": vehicle_type,
+                                "track_id": f"V-{obj.track_id}",
+                                "reason": watchlist_entry.reason or "Vehicle on security watchlist",
+                                "camera_name": cam_name,
+                                "camera_location": cam_loc,
+                                "ocr_confidence": final_ocr_conf,
+                                "timestamp": ts_str,
+                            },
+                            timestamp=now_dt,
+                            track_id=obj.track_id,
+                        )
+                        db.add(ev)
+
+                        al = Alert(
+                            id=str(uuid.uuid4()),
+                            camera_id=cam_id,
+                            event_id=ev.id,
+                            event_type="ANPR_WATCHLIST_MATCH",
+                            severity=severity,
+                            risk_score=risk_score,
+                            confidence=final_ocr_conf,
+                            status="NEW",
+                            evidence_url=snap_url,
+                            timestamp=now_dt,
+                            track_id=obj.track_id,
+                            location=cam_loc,
+                            details={
+                                "plate_number": final_plate,
+                                "vehicle_type": vehicle_type,
+                                "track_id": f"V-{obj.track_id}",
+                                "reason": watchlist_entry.reason or "Vehicle on security watchlist",
+                                "camera_name": cam_name,
+                                "location": cam_loc,
+                                "timestamp": ts_str,
+                            }
+                        )
+                        db.add(al)
+
+                        inc_num = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+                        inc_anpr = Incident(
+                            id=str(uuid.uuid4()),
+                            incident_number=inc_num,
+                            camera_id=cam_id,
+                            alert_id=al.id,
+                            title=f"{severity} WATCHLIST VEHICLE — {final_plate}",
+                            description=f"Blacklisted vehicle with license plate '{final_plate}' ({vehicle_type}) detected at {cam_name}. Reason: {watchlist_entry.reason or 'Security Watchlist'}",
+                            severity=severity,
+                            risk_score=risk_score,
+                            status="NEW",
+                            related_event_ids=[ev.id],
+                            start_time=now_dt,
+                            created_at=now_dt,
+                        )
+                        db.add(inc_anpr)
+                        al.incident_id = inc_anpr.id
+
+                        if snap_path:
+                            ev_evidence_anpr = Evidence(
+                                id=str(uuid.uuid4()),
+                                incident_id=inc_anpr.id,
+                                camera_id=cam_id,
+                                evidence_type="snapshot",
+                                file_path=snap_path,
+                                file_url=snap_url,
+                                file_size_bytes=snap_size,
+                                metadata_json={
+                                    "alert_id": al.id,
+                                    "event_id": ev.id,
+                                    "plate_number": final_plate,
+                                    "timestamp": ts_str,
+                                },
+                                created_at=now_dt,
+                            )
+                            db.add(ev_evidence_anpr)
+
+                        db.commit()
+
+                        await self.ws_manager.broadcast({
+                            "type": "ALERT_NEW",
+                            "alert_id": al.id,
+                            "event_id": ev.id,
+                            "incident_id": inc_anpr.id,
                             "incident_number": inc_anpr.incident_number,
                             "camera_id": cam_id,
                             "camera_number": cam_num,
                             "camera_name": cam_name,
+                            "location": cam_loc,
+                            "object_class": "vehicle",
+                            "track_id": f"V-{obj.track_id}",
+                            "confidence": final_ocr_conf,
+                            "event_type": "ANPR_WATCHLIST_MATCH",
+                            "alert_title": f"🚨 WATCHLIST VEHICLE — {final_plate}",
+                            "plate_number": final_plate,
+                            "vehicle_type": vehicle_type,
+                            "severity": severity,
+                            "risk_score": risk_score,
+                            "evidence_url": snap_url,
+                            "timestamp": ts_str,
+                            "alert": {
+                                "id": al.id,
+                                "camera_id": cam_id,
+                                "camera_number": cam_num,
+                                "camera_name": cam_name,
+                                "location": cam_loc,
+                                "plate_number": final_plate,
+                                "vehicle_type": vehicle_type,
+                                "event_type": "ANPR_WATCHLIST_MATCH",
+                                "alert_title": f"🚨 WATCHLIST VEHICLE — {final_plate}",
+                                "severity": severity,
+                                "risk_score": risk_score,
+                                "evidence_url": snap_url,
+                                "timestamp": ts_str,
+                            }
+                        })
+
+                        await self.ws_manager.broadcast({
+                            "type": "INCIDENT_NEW",
+                            "incident_id": inc_anpr.id,
+                            "incident_number": inc_anpr.incident_number,
+                            "event_id": ev.id,
+                            "alert_id": al.id,
+                            "camera_id": cam_id,
+                            "camera_number": cam_num,
+                            "camera_name": cam_name,
+                            "location": cam_loc,
                             "title": inc_anpr.title,
                             "description": inc_anpr.description,
                             "severity": severity,
                             "risk_score": risk_score,
                             "status": inc_anpr.status,
-                            "start_time": ts_str,
+                            "timestamp": ts_str,
                             "created_at": ts_str,
-                        }
-                    })
+                            "evidence_url": snap_url,
+                            "incident": {
+                                "id": inc_anpr.id,
+                                "incident_number": inc_anpr.incident_number,
+                                "camera_id": cam_id,
+                                "camera_number": cam_num,
+                                "camera_name": cam_name,
+                                "title": inc_anpr.title,
+                                "description": inc_anpr.description,
+                                "severity": severity,
+                                "risk_score": risk_score,
+                                "status": inc_anpr.status,
+                                "start_time": ts_str,
+                                "created_at": ts_str,
+                            }
+                        })
 
             except Exception as ex:
                 logger.error(f"[ANPR] Pipeline error on {self.camera_id}: {ex}", exc_info=True)

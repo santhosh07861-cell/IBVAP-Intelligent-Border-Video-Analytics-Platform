@@ -68,9 +68,12 @@ VEHICLE_TYPE_MAP = {
     "van": "VAN",
     "auto": "AUTO-RICKSHAW",
     "auto-rickshaw": "AUTO-RICKSHAW",
+    "train": "TRAIN",
+    "airplane": "AIRPLANE",
+    "boat": "BOAT",
 }
 
-VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle", "bicycle", "van"}
+VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle", "bicycle", "van", "auto", "auto-rickshaw", "train", "airplane", "boat"}
 
 
 class ANPRPlateTracker:
