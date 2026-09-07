@@ -285,22 +285,31 @@ export const FaceView: React.FC = () => {
   // Delete Historical Face Detection Record (does NOT delete watchlist profiles)
   const handleConfirmDeleteFaceDetection = async () => {
     if (!faceToDelete) return;
+    const targetId = faceToDelete.id || faceToDelete.face_id || faceToDelete.detection_id;
+    if (!targetId) {
+      setFaceToDelete(null);
+      return;
+    }
     setIsDeletingFace(true);
     try {
-      const res = await fetch(`/api/faces/detections/${faceToDelete.id}`, {
+      const res = await fetch(`/api/faces/detections/${targetId}`, {
         method: 'DELETE',
         headers: getHeaders()
       });
       if (res.ok) {
-        setDetections((prev) => prev.filter((d) => d.id !== faceToDelete.id));
+        setDetections((prev) => prev.filter((d) => (d.id || d.face_id || d.detection_id) !== targetId));
         setFaceToDelete(null);
         fetchKpis();
       } else {
-        alert('Failed to delete face detection record.');
+        const errText = await res.text();
+        const cleanErr = errText.trim().startsWith('<')
+          ? 'Backend server returned 404. Ensure your backend server is running.'
+          : errText;
+        alert(`Failed to delete face detection record: ${cleanErr || res.statusText}`);
       }
     } catch (err) {
       console.error('Failed to delete face detection:', err);
-      alert('Error deleting face detection.');
+      alert('Error deleting face detection. Please check backend connection.');
     } finally {
       setIsDeletingFace(false);
     }
