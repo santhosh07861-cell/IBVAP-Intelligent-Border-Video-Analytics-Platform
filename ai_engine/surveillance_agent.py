@@ -21,7 +21,8 @@ from backend.blockchain_audit import create_audit_block
 
 from backend.config import (
     DETECTION_CONFIDENCE_THRESHOLD, LOITERING_THRESHOLD_SEC, ALERT_COOLDOWN_SEC, EVIDENCE_CAPTURE_INTERVAL_SEC,
-    ANPR_DUPLICATE_COOLDOWN_SEC
+    ANPR_DUPLICATE_COOLDOWN_SEC, UNKNOWN_PERSON_ALERT_REFIRE_SEC, WATCHLIST_FACE_ALERT_REFIRE_SEC,
+    ZONE_INTRUSION_COOLDOWN_SEC, ZONE_LOITERING_COOLDOWN_SEC, ZONE_EXIT_DEBOUNCE_FRAMES, FACE_RECORD_COOLDOWN_SEC
 )
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,22 @@ class AISurveillanceAgent:
         self.active_faces: List[Dict[str, Any]] = []
         self.active_anpr: List[Dict[str, Any]] = []
         self.track_zone_states: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
-        self.mode_label = "REAL AI | INFERENCE RUNNING"
+        # active_alert_ids: one canonical alert per (camera, track, zone, event_type)
+        # while the violation is ongoing. Cleared when the track exits the zone.
+        # Prevents creating new Alert+Incident+Evidence on every cooldown tick.
+        self.active_alert_ids: Dict[str, str] = {}
+        # face_alert_state: per (camera, face_track_id, event_type) — tracks whether
+        # an alert has already been raised for this face track and when it was raised.
+        # Format: key -> {"alert_id": str, "created_at": float}
+        self.face_alert_state: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
+        # Zone-level cooldown enforcement: (camera_id, zone_id, event_type) -> float timestamp
+        self.zone_last_alert_times: Dict[Tuple[str, str, str], float] = {}
+        # Consecutive outside frames for exit debouncing: (camera_id, track_id, zone_id) -> int count
+        self.outside_frame_counts: Dict[Tuple[str, int, str], int] = {}
+        # Suppression caches for operator-deleted items: key -> expiration timestamp
+        self.suppressed_alert_keys: Dict[str, float] = {}
+        self.suppressed_face_keys: Dict[Any, float] = {}
+
 
     async def process_frame(self, frame: np.ndarray, loop_start_time: float, pre_frame: Optional[np.ndarray] = None) -> Tuple[List[TrackedObject], float, float, List[Dict[str, Any]], List[Dict[str, Any]]]:
         if frame is None or frame.size == 0:
@@ -222,26 +238,42 @@ class AISurveillanceAgent:
 
                 is_uncertain = (track.recognition_status == "UNCERTAIN") or (not getattr(track, "is_high_quality", True) and track.quality_score < 0.35)
 
-                # Deduplication logic
-                if is_verified_student_staff:
-                    event_type = "STUDENT_VERIFIED"
-                    dedup_key = (self.camera_id, track.track_id, str(p_badge), event_type)
-                    cooldown_sec = 60.0
-                elif is_threat_watchlist:
-                    event_type = "FACE_WATCHLIST_MATCH"
-                    dedup_key = (self.camera_id, track.track_id, str(p_badge), event_type)
-                    cooldown_sec = 30.0
-                elif is_uncertain:
-                    event_type = "UNCERTAIN_FACE"
-                    dedup_key = (self.camera_id, track.track_id, "UNCERTAIN", event_type)
-                    cooldown_sec = 60.0
-                else:
-                    event_type = "UNKNOWN_PERSON_DETECTED"
-                    dedup_key = (self.camera_id, track.track_id, "UNKNOWN", event_type)
-                    cooldown_sec = 45.0
+                # ── Per-track FaceDetection DB record throttle ────────────────────────
+                # Controls how often we write a FaceDetection row and save a new snapshot.
+                # This is separate from alert creation (which is strictly one-per-track).
+                # Check suppression cache (if operator recently deleted detection for this track or identity)
+                track_face_suppressed = (
+                    self.suppressed_face_keys.get((self.camera_id, track.track_id), 0) > now_sec or
+                    (is_known and self.suppressed_face_keys.get((self.camera_id, track.identity_name), 0) > now_sec) or
+                    (not is_known and self.suppressed_face_keys.get((self.camera_id, "UNKNOWN"), 0) > now_sec)
+                )
+                if track_face_suppressed:
+                    continue
 
-                if now_sec - self.last_face_db_record_times.get(dedup_key, 0) >= cooldown_sec:
-                    self.last_face_db_record_times[dedup_key] = now_sec
+                if is_verified_student_staff:
+                    fd_dedup_key = (self.camera_id, track.track_id, str(p_badge), "STUDENT_VERIFIED")
+                    fd_cooldown = 60.0
+                elif is_threat_watchlist:
+                    fd_dedup_key = (self.camera_id, track.track_id, str(p_badge), "FACE_WATCHLIST_MATCH")
+                    fd_cooldown = 30.0
+                elif is_uncertain:
+                    fd_dedup_key = (self.camera_id, track.track_id, "UNCERTAIN", "UNCERTAIN_FACE")
+                    fd_cooldown = 60.0
+                else:
+                    fd_dedup_key = (self.camera_id, track.track_id, "UNKNOWN", "UNKNOWN_PERSON_DETECTED")
+                    fd_cooldown = FACE_RECORD_COOLDOWN_SEC
+
+                face_ident_key = (self.camera_id, track.identity_name if is_known else "UNKNOWN")
+                time_since_ident = now_sec - self.last_face_db_record_times.get(face_ident_key, 0)
+
+                do_fd_record = (
+                    (now_sec - self.last_face_db_record_times.get(fd_dedup_key, 0)) >= fd_cooldown and
+                    time_since_ident >= min(fd_cooldown, 30.0)
+                )
+                if do_fd_record:
+                    self.last_face_db_record_times[fd_dedup_key] = now_sec
+                    self.last_face_db_record_times[face_ident_key] = now_sec
+
 
                     # Offload crop and snapshot saving to background thread
                     crop_saved = await loop.run_in_executor(
@@ -268,7 +300,13 @@ class AISurveillanceAgent:
                     now_dt = datetime.utcnow()
                     ts_str = f"{now_dt.isoformat()}Z"
 
-                    # 1. Insert FaceDetection log record
+                    logger.info(
+                        f"[TRACK_UPDATED] camera={self.camera_id} face_track_id={track.track_id} "
+                        f"status={track.recognition_status} quality={track.quality_score:.2f} "
+                        f"conf={track.confidence:.2f} recog_conf={track.recognition_confidence:.3f}"
+                    )
+
+                    # 1. Insert FaceDetection log record (always, for AI Detection History)
                     face_rec = FaceDetection(
                         id=str(uuid.uuid4()),
                         camera_id=cam_id,
@@ -312,121 +350,118 @@ class AISurveillanceAgent:
                         db.add(ev_student)
                         db.commit()
 
-                    # 3. Case B: Threat / Watchlist Match -> CRITICAL Security Alert + Incident + Immediate Alarm
+                    # 3. Case B: Threat / Watchlist Match -> ONE CRITICAL Alert per track
                     elif is_threat_watchlist:
-                        logger.warning(f"🚨 [WATCHLIST THREAT DETECTED] Subject: {track.identity_name} ({p_badge}) on {cam_num}")
-                        ev_threat = Event(
-                            id=str(uuid.uuid4()),
-                            camera_id=cam_id,
-                            event_type="FACE_WATCHLIST_MATCH",
-                            severity="CRITICAL",
-                            risk_score=95.0,
-                            confidence=track.recognition_confidence,
-                            details={
-                                "person_name": track.identity_name,
-                                "person_id": p_badge,
-                                "category": p_cat,
-                                "verification_status": "WATCHLIST_MATCH",
-                                "camera_name": cam_name,
-                                "camera_location": cam_loc,
-                                "timestamp": ts_str,
-                            },
-                            timestamp=now_dt,
-                            track_id=track.track_id
-                        )
-                        db.add(ev_threat)
+                        face_alert_key = (self.camera_id, track.track_id, "FACE_WATCHLIST_MATCH")
+                        existing = self.face_alert_state.get(face_alert_key)
+                        refire_due = existing and (now_sec - existing["created_at"] >= WATCHLIST_FACE_ALERT_REFIRE_SEC)
 
-                        al_threat = Alert(
-                            id=str(uuid.uuid4()),
-                            camera_id=cam_id,
-                            event_id=ev_threat.id,
-                            event_type="FACE_WATCHLIST_MATCH",
-                            severity="CRITICAL",
-                            risk_score=95.0,
-                            confidence=track.recognition_confidence,
-                            status="NEW",
-                            evidence_url=snap_url,
-                            timestamp=now_dt,
-                            track_id=track.track_id,
-                            location=cam_loc,
-                            details={
-                                "person_name": track.identity_name,
-                                "person_id": p_badge,
-                                "category": p_cat,
-                                "camera_name": cam_name,
-                                "location": cam_loc,
-                                "timestamp": ts_str,
-                            }
-                        )
-                        db.add(al_threat)
-
-                        inc_num = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
-                        inc_threat = Incident(
-                            id=str(uuid.uuid4()),
-                            incident_number=inc_num,
-                            camera_id=cam_id,
-                            alert_id=al_threat.id,
-                            title=f"CRITICAL WATCHLIST THREAT — {track.identity_name.upper()}",
-                            description=f"Watchlist subject '{track.identity_name}' (ID: {p_badge}, Category: {p_cat}) detected at {cam_name} with {int(track.recognition_confidence * 100)}% match similarity.",
-                            severity="CRITICAL",
-                            risk_score=95.0,
-                            status="NEW",
-                            related_event_ids=[ev_threat.id],
-                            start_time=now_dt,
-                            created_at=now_dt
-                        )
-                        db.add(inc_threat)
-                        al_threat.incident_id = inc_threat.id
-
-                        if snap_saved:
-                            ev_evidence = Evidence(
+                        if not existing or refire_due:
+                            logger.warning(
+                                f"🚨 [WATCHLIST THREAT DETECTED] Subject: {track.identity_name} ({p_badge}) on {cam_num} "
+                                f"similarity={track.recognition_confidence:.3f}"
+                            )
+                            ev_threat = Event(
                                 id=str(uuid.uuid4()),
-                                incident_id=inc_threat.id,
                                 camera_id=cam_id,
-                                evidence_type="snapshot",
-                                file_path=snap_path,
-                                file_url=snap_url,
-                                file_size_bytes=snap_size,
-                                metadata_json={
-                                    "alert_id": al_threat.id,
-                                    "event_id": ev_threat.id,
+                                event_type="FACE_WATCHLIST_MATCH",
+                                severity="CRITICAL",
+                                risk_score=95.0,
+                                confidence=track.recognition_confidence,
+                                details={
                                     "person_name": track.identity_name,
                                     "person_id": p_badge,
                                     "category": p_cat,
+                                    "verification_status": "WATCHLIST_MATCH",
+                                    "camera_name": cam_name,
+                                    "camera_location": cam_loc,
                                     "timestamp": ts_str,
                                 },
+                                timestamp=now_dt,
+                                track_id=track.track_id
+                            )
+                            db.add(ev_threat)
+                            db.flush()
+
+                            al_threat = Alert(
+                                id=str(uuid.uuid4()),
+                                camera_id=cam_id,
+                                event_id=ev_threat.id,
+                                event_type="FACE_WATCHLIST_MATCH",
+                                severity="CRITICAL",
+                                risk_score=95.0,
+                                confidence=track.recognition_confidence,
+                                status="NEW",
+                                evidence_url=snap_url,
+                                timestamp=now_dt,
+                                track_id=track.track_id,
+                                location=cam_loc,
+                                details={
+                                    "person_name": track.identity_name,
+                                    "person_id": p_badge,
+                                    "category": p_cat,
+                                    "camera_name": cam_name,
+                                    "location": cam_loc,
+                                    "timestamp": ts_str,
+                                }
+                            )
+                            db.add(al_threat)
+                            db.flush()
+
+                            inc_num = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+                            inc_threat = Incident(
+                                id=str(uuid.uuid4()),
+                                incident_number=inc_num,
+                                camera_id=cam_id,
+                                alert_id=al_threat.id,
+                                title=f"CRITICAL WATCHLIST THREAT — {track.identity_name.upper()}",
+                                description=f"Watchlist subject '{track.identity_name}' (ID: {p_badge}, Category: {p_cat}) detected at {cam_name} with {int(track.recognition_confidence * 100)}% match similarity.",
+                                severity="CRITICAL",
+                                risk_score=95.0,
+                                status="NEW",
+                                related_event_ids=[ev_threat.id],
+                                start_time=now_dt,
                                 created_at=now_dt
                             )
-                            db.add(ev_evidence)
+                            db.add(inc_threat)
+                            db.flush()
+                            al_threat.incident_id = inc_threat.id
 
-                        db.commit()
+                            if snap_saved:
+                                ev_evidence = Evidence(
+                                    id=str(uuid.uuid4()),
+                                    incident_id=inc_threat.id,
+                                    camera_id=cam_id,
+                                    evidence_type="snapshot",
+                                    file_path=snap_path,
+                                    file_url=snap_url,
+                                    file_size_bytes=snap_size,
+                                    metadata_json={
+                                        "alert_id": al_threat.id,
+                                        "event_id": ev_threat.id,
+                                        "person_name": track.identity_name,
+                                        "person_id": p_badge,
+                                        "category": p_cat,
+                                        "timestamp": ts_str,
+                                    },
+                                    created_at=now_dt
+                                )
+                                db.add(ev_evidence)
 
-                        # Broadcast WebSocket ALERT_NEW
-                        await self.ws_manager.broadcast({
-                            "type": "ALERT_NEW",
-                            "alert_id": al_threat.id,
-                            "event_id": ev_threat.id,
-                            "incident_id": inc_threat.id,
-                            "incident_number": inc_threat.incident_number,
-                            "camera_id": cam_id,
-                            "camera_number": cam_num,
-                            "camera_name": cam_name,
-                            "location": cam_loc,
-                            "object_class": "person",
-                            "track_id": f"F-{track.track_id}",
-                            "confidence": track.recognition_confidence,
-                            "event_type": "FACE_WATCHLIST_MATCH",
-                            "alert_title": f"🚨 WATCHLIST THREAT — {track.identity_name.upper()}",
-                            "person_name": track.identity_name,
-                            "person_id": p_badge,
-                            "category": p_cat,
-                            "similarity": track.recognition_confidence,
-                            "risk_score": 95.0,
-                            "severity": "CRITICAL",
-                            "timestamp": ts_str,
-                            "evidence_url": snap_url,
-                            "alert": {
-                                "id": al_threat.id,
+                            db.commit()
+                            self.face_alert_state[face_alert_key] = {"alert_id": al_threat.id, "created_at": now_sec}
+                            logger.info(
+                                f"[ALERT_CREATED] alert_id={al_threat.id} event=FACE_WATCHLIST_MATCH "
+                                f"camera={cam_num} face_track_id={track.track_id} identity={track.identity_name}"
+                            )
+
+                            # ONE canonical ALERT_NEW broadcast (not 4)
+                            await self.ws_manager.broadcast({
+                                "type": "ALERT_NEW",
+                                "alert_id": al_threat.id,
+                                "event_id": ev_threat.id,
+                                "incident_id": inc_threat.id,
+                                "incident_number": inc_threat.incident_number,
                                 "camera_id": cam_id,
                                 "camera_number": cam_num,
                                 "camera_name": cam_name,
@@ -438,73 +473,66 @@ class AISurveillanceAgent:
                                 "alert_title": f"🚨 WATCHLIST THREAT — {track.identity_name.upper()}",
                                 "person_name": track.identity_name,
                                 "person_id": p_badge,
-                                "severity": "CRITICAL",
+                                "category": p_cat,
+                                "similarity": track.recognition_confidence,
                                 "risk_score": 95.0,
-                                "evidence_url": snap_url,
+                                "severity": "CRITICAL",
                                 "timestamp": ts_str,
-                            }
-                        })
-
-                        # Broadcast WebSocket INCIDENT_NEW
-                        await self.ws_manager.broadcast({
-                            "type": "INCIDENT_NEW",
-                            "incident_id": inc_threat.id,
-                            "incident_number": inc_threat.incident_number,
-                            "event_id": ev_threat.id,
-                            "alert_id": al_threat.id,
-                            "camera_id": cam_id,
-                            "camera_number": cam_num,
-                            "camera_name": cam_name,
-                            "location": cam_loc,
-                            "title": inc_threat.title,
-                            "description": inc_threat.description,
-                            "severity": "CRITICAL",
-                            "risk_score": 95.0,
-                            "status": inc_threat.status,
-                            "timestamp": ts_str,
-                            "created_at": ts_str,
-                            "evidence_url": snap_url,
-                            "incident": {
-                                "id": inc_threat.id,
+                                "evidence_url": snap_url,
+                                "alert": {
+                                    "id": al_threat.id,
+                                    "camera_id": cam_id,
+                                    "camera_number": cam_num,
+                                    "camera_name": cam_name,
+                                    "location": cam_loc,
+                                    "object_class": "person",
+                                    "track_id": f"F-{track.track_id}",
+                                    "confidence": track.recognition_confidence,
+                                    "event_type": "FACE_WATCHLIST_MATCH",
+                                    "alert_title": f"🚨 WATCHLIST THREAT — {track.identity_name.upper()}",
+                                    "person_name": track.identity_name,
+                                    "person_id": p_badge,
+                                    "severity": "CRITICAL",
+                                    "risk_score": 95.0,
+                                    "evidence_url": snap_url,
+                                    "timestamp": ts_str,
+                                }
+                            })
+                            await self.ws_manager.broadcast({
+                                "type": "INCIDENT_NEW",
+                                "incident_id": inc_threat.id,
                                 "incident_number": inc_threat.incident_number,
+                                "event_id": ev_threat.id,
+                                "alert_id": al_threat.id,
                                 "camera_id": cam_id,
                                 "camera_number": cam_num,
                                 "camera_name": cam_name,
+                                "location": cam_loc,
                                 "title": inc_threat.title,
                                 "description": inc_threat.description,
                                 "severity": "CRITICAL",
                                 "risk_score": 95.0,
                                 "status": inc_threat.status,
-                                "start_time": ts_str,
+                                "timestamp": ts_str,
                                 "created_at": ts_str,
-                            }
-                        })
-
-                        await self.ws_manager.broadcast({
-                            "type": "FACE_WATCHLIST_MATCH",
-                            "alert_id": al_threat.id,
-                            "event_id": ev_threat.id,
-                            "incident_id": inc_threat.id,
-                            "incident_number": inc_threat.incident_number,
-                            "camera_id": cam_id,
-                            "camera_number": cam_num,
-                            "camera_name": cam_name,
-                            "location": cam_loc,
-                            "event_type": "FACE_WATCHLIST_MATCH",
-                            "alert_title": f"🚨 WATCHLIST THREAT — {track.identity_name.upper()}",
-                            "person_name": track.identity_name,
-                            "person_id": p_badge,
-                            "category": p_cat,
-                            "track_id": f"F-{track.track_id}",
-                            "similarity": track.recognition_confidence,
-                            "severity": "CRITICAL",
-                            "risk_score": 95.0,
-                            "evidence_url": snap_url,
-                            "snapshot_url": snap_url,
-                            "crop_url": crop_url,
-                            "timestamp": ts_str,
-                            "alert": {
-                                "id": al_threat.id,
+                                "evidence_url": snap_url,
+                                "incident": {
+                                    "id": inc_threat.id,
+                                    "incident_number": inc_threat.incident_number,
+                                    "camera_id": cam_id,
+                                    "camera_number": cam_num,
+                                    "camera_name": cam_name,
+                                    "title": inc_threat.title,
+                                    "description": inc_threat.description,
+                                    "severity": "CRITICAL",
+                                    "risk_score": 95.0,
+                                    "status": inc_threat.status,
+                                    "start_time": ts_str,
+                                    "created_at": ts_str,
+                                }
+                            })
+                            await self.ws_manager.broadcast({
+                                "type": "FACE_WATCHLIST_MATCH",
                                 "alert_id": al_threat.id,
                                 "event_id": ev_threat.id,
                                 "incident_id": inc_threat.id,
@@ -517,168 +545,136 @@ class AISurveillanceAgent:
                                 "person_name": track.identity_name,
                                 "person_id": p_badge,
                                 "category": p_cat,
+                                "track_id": f"F-{track.track_id}",
+                                "similarity": track.recognition_confidence,
                                 "severity": "CRITICAL",
                                 "risk_score": 95.0,
                                 "evidence_url": snap_url,
+                                "snapshot_url": snap_url,
+                                "crop_url": crop_url,
                                 "timestamp": ts_str,
-                            }
-                        })
-
-                        await self.ws_manager.broadcast({
-                            "type": "ALERT_NEW",
-                            "alert_id": al_threat.id,
-                            "event_id": ev_threat.id,
-                            "incident_id": inc_threat.id,
-                            "incident_number": inc_threat.incident_number,
-                            "camera_id": cam_id,
-                            "camera_number": cam_num,
-                            "camera_name": cam_name,
-                            "location": cam_loc,
-                            "event_type": "FACE_WATCHLIST_MATCH",
-                            "alert_title": f"🚨 WATCHLIST THREAT — {track.identity_name.upper()}",
-                            "person_name": track.identity_name,
-                            "person_id": p_badge,
-                            "category": p_cat,
-                            "track_id": f"F-{track.track_id}",
-                            "similarity": track.recognition_confidence,
-                            "severity": "CRITICAL",
-                            "risk_score": 95.0,
-                            "evidence_url": snap_url,
-                            "timestamp": ts_str,
-                            "alert": {
-                                "id": al_threat.id,
-                                "alert_id": al_threat.id,
-                                "event_id": ev_threat.id,
-                                "incident_id": inc_threat.id,
-                                "camera_id": cam_id,
-                                "camera_number": cam_num,
-                                "camera_name": cam_name,
-                                "location": cam_loc,
-                                "event_type": "FACE_WATCHLIST_MATCH",
-                                "alert_title": f"🚨 WATCHLIST THREAT — {track.identity_name.upper()}",
-                                "person_name": track.identity_name,
-                                "person_id": p_badge,
-                                "category": p_cat,
-                                "severity": "CRITICAL",
-                                "risk_score": 95.0,
-                                "evidence_url": snap_url,
-                                "timestamp": ts_str,
-                            }
-                        })
+                            })
+                        else:
+                            # Alert already active for this face track — deduplicate
+                            logger.info(
+                                f"[ALERT_DEDUPLICATED] camera={self.camera_id} face_track_id={track.track_id} "
+                                f"event=FACE_WATCHLIST_MATCH existing_alert_id={existing['alert_id']} "
+                                f"reason=track_still_active"
+                            )
+                            db.commit()
 
                     # 4. Case C: Uncertain / Low Quality Face -> Log only (NO Alarm)
                     elif is_uncertain:
                         logger.info(f"ℹ️ [UNCERTAIN FACE QUALITY] Track #{track.track_id} on {cam_num} (Quality Score: {track.quality_score:.2f}) — Logged only, NO ALARM")
                         db.commit()
 
-                    # 5. Case D: Unknown Person -> Security Alert (Verification Required) + Incident + Alarm
+                    # 5. Case D: Unknown Person -> ONE Security Alert per track
                     else:
-                        logger.info(f"⚠️ [UNKNOWN PERSON DETECTED] Track #{track.track_id} on {cam_num} — Security Alert Generated")
-                        ev_unknown = Event(
-                            id=str(uuid.uuid4()),
-                            camera_id=cam_id,
-                            event_type="UNKNOWN_PERSON_DETECTED",
-                            severity="HIGH",
-                            risk_score=75.0,
-                            confidence=track.confidence,
-                            details={
-                                "person_name": "UNKNOWN PERSON",
-                                "verification_status": "UNKNOWN",
-                                "track_id": f"F-{track.track_id}",
-                                "camera_name": cam_name,
-                                "camera_location": cam_loc,
-                                "timestamp": ts_str,
-                            },
-                            timestamp=now_dt,
-                            track_id=track.track_id
-                        )
-                        db.add(ev_unknown)
+                        face_alert_key = (self.camera_id, track.track_id, "UNKNOWN_PERSON_DETECTED")
+                        existing = self.face_alert_state.get(face_alert_key)
+                        refire_due = existing and (now_sec - existing["created_at"] >= UNKNOWN_PERSON_ALERT_REFIRE_SEC)
 
-                        al_unknown = Alert(
-                            id=str(uuid.uuid4()),
-                            camera_id=cam_id,
-                            event_id=ev_unknown.id,
-                            event_type="UNKNOWN_PERSON_DETECTED",
-                            severity="HIGH",
-                            risk_score=75.0,
-                            confidence=track.confidence,
-                            status="NEW",
-                            evidence_url=snap_url,
-                            timestamp=now_dt,
-                            track_id=track.track_id,
-                            location=cam_loc,
-                            details={
-                                "track_id": f"F-{track.track_id}",
-                                "camera_name": cam_name,
-                                "location": cam_loc,
-                                "timestamp": ts_str,
-                            }
-                        )
-                        db.add(al_unknown)
-
-                        inc_num_unk = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
-                        inc_unknown = Incident(
-                            id=str(uuid.uuid4()),
-                            incident_number=inc_num_unk,
-                            camera_id=cam_id,
-                            alert_id=al_unknown.id,
-                            title=f"HIGH UNKNOWN PERSON DETECTED — {cam_name}",
-                            description=f"Unrecognized subject (Track #F-{track.track_id}) detected at {cam_name}. Operator identity verification required.",
-                            severity="HIGH",
-                            risk_score=75.0,
-                            status="NEW",
-                            related_event_ids=[ev_unknown.id],
-                            start_time=now_dt,
-                            created_at=now_dt
-                        )
-                        db.add(inc_unknown)
-                        al_unknown.incident_id = inc_unknown.id
-
-                        if snap_saved:
-                            ev_evidence_unk = Evidence(
+                        if not existing or refire_due:
+                            logger.info(
+                                f"⚠️ [UNKNOWN PERSON DETECTED] Track #{track.track_id} on {cam_num} — "
+                                f"Security Alert Generated (first_alert={existing is None})"
+                            )
+                            ev_unknown = Event(
                                 id=str(uuid.uuid4()),
-                                incident_id=inc_unknown.id,
                                 camera_id=cam_id,
-                                evidence_type="snapshot",
-                                file_path=snap_path,
-                                file_url=snap_url,
-                                file_size_bytes=snap_size,
-                                metadata_json={
-                                    "alert_id": al_unknown.id,
-                                    "event_id": ev_unknown.id,
+                                event_type="UNKNOWN_PERSON_DETECTED",
+                                severity="HIGH",
+                                risk_score=75.0,
+                                confidence=track.confidence,
+                                details={
+                                    "person_name": "UNKNOWN PERSON",
+                                    "verification_status": "UNKNOWN",
                                     "track_id": f"F-{track.track_id}",
+                                    "camera_name": cam_name,
+                                    "camera_location": cam_loc,
                                     "timestamp": ts_str,
                                 },
+                                timestamp=now_dt,
+                                track_id=track.track_id
+                            )
+                            db.add(ev_unknown)
+                            db.flush()
+
+                            al_unknown = Alert(
+                                id=str(uuid.uuid4()),
+                                camera_id=cam_id,
+                                event_id=ev_unknown.id,
+                                event_type="UNKNOWN_PERSON_DETECTED",
+                                severity="HIGH",
+                                risk_score=75.0,
+                                confidence=track.confidence,
+                                status="NEW",
+                                evidence_url=snap_url,
+                                timestamp=now_dt,
+                                track_id=track.track_id,
+                                location=cam_loc,
+                                details={
+                                    "track_id": f"F-{track.track_id}",
+                                    "camera_name": cam_name,
+                                    "location": cam_loc,
+                                    "timestamp": ts_str,
+                                }
+                            )
+                            db.add(al_unknown)
+                            db.flush()
+
+                            inc_num_unk = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+                            inc_unknown = Incident(
+                                id=str(uuid.uuid4()),
+                                incident_number=inc_num_unk,
+                                camera_id=cam_id,
+                                alert_id=al_unknown.id,
+                                title=f"HIGH UNKNOWN PERSON DETECTED — {cam_name}",
+                                description=f"Unrecognized subject (Track #F-{track.track_id}) detected at {cam_name}. Operator identity verification required.",
+                                severity="HIGH",
+                                risk_score=75.0,
+                                status="NEW",
+                                related_event_ids=[ev_unknown.id],
+                                start_time=now_dt,
                                 created_at=now_dt
                             )
-                            db.add(ev_evidence_unk)
+                            db.add(inc_unknown)
+                            db.flush()
+                            al_unknown.incident_id = inc_unknown.id
 
-                        db.commit()
+                            if snap_saved:
+                                ev_evidence_unk = Evidence(
+                                    id=str(uuid.uuid4()),
+                                    incident_id=inc_unknown.id,
+                                    camera_id=cam_id,
+                                    evidence_type="snapshot",
+                                    file_path=snap_path,
+                                    file_url=snap_url,
+                                    file_size_bytes=snap_size,
+                                    metadata_json={
+                                        "alert_id": al_unknown.id,
+                                        "event_id": ev_unknown.id,
+                                        "track_id": f"F-{track.track_id}",
+                                        "timestamp": ts_str,
+                                    },
+                                    created_at=now_dt
+                                )
+                                db.add(ev_evidence_unk)
 
-                        # Broadcast WebSocket ALERT_NEW
-                        await self.ws_manager.broadcast({
-                            "type": "ALERT_NEW",
-                            "alert_id": al_unknown.id,
-                            "event_id": ev_unknown.id,
-                            "incident_id": inc_unknown.id,
-                            "incident_number": inc_unknown.incident_number,
-                            "camera_id": cam_id,
-                            "camera_number": cam_num,
-                            "camera_name": cam_name,
-                            "location": cam_loc,
-                            "object_class": "person",
-                            "track_id": f"F-{track.track_id}",
-                            "confidence": track.confidence,
-                            "event_type": "UNKNOWN_PERSON_DETECTED",
-                            "alert_title": "⚠️ UNKNOWN PERSON — VERIFICATION REQUIRED",
-                            "person_name": "UNKNOWN PERSON",
-                            "category": "UNKNOWN",
-                            "risk_score": 75.0,
-                            "severity": "HIGH",
-                            "timestamp": ts_str,
-                            "evidence_url": snap_url,
-                            "alert": {
-                                "id": al_unknown.id,
+                            db.commit()
+                            self.face_alert_state[face_alert_key] = {"alert_id": al_unknown.id, "created_at": now_sec}
+                            logger.info(
+                                f"[ALERT_CREATED] alert_id={al_unknown.id} event=UNKNOWN_PERSON_DETECTED "
+                                f"camera={cam_num} face_track_id={track.track_id}"
+                            )
+
+                            # ONE ALERT_NEW broadcast
+                            await self.ws_manager.broadcast({
+                                "type": "ALERT_NEW",
+                                "alert_id": al_unknown.id,
+                                "event_id": ev_unknown.id,
+                                "incident_id": inc_unknown.id,
+                                "incident_number": inc_unknown.incident_number,
                                 "camera_id": cam_id,
                                 "camera_number": cam_num,
                                 "camera_name": cam_name,
@@ -690,70 +686,94 @@ class AISurveillanceAgent:
                                 "alert_title": "⚠️ UNKNOWN PERSON — VERIFICATION REQUIRED",
                                 "person_name": "UNKNOWN PERSON",
                                 "category": "UNKNOWN",
-                                "severity": "HIGH",
                                 "risk_score": 75.0,
-                                "evidence_url": snap_url,
+                                "severity": "HIGH",
                                 "timestamp": ts_str,
-                            }
-                        })
-
-                        # Broadcast WebSocket INCIDENT_NEW
-                        await self.ws_manager.broadcast({
-                            "type": "INCIDENT_NEW",
-                            "incident_id": inc_unknown.id,
-                            "incident_number": inc_unknown.incident_number,
-                            "event_id": ev_unknown.id,
-                            "alert_id": al_unknown.id,
-                            "camera_id": cam_id,
-                            "camera_number": cam_num,
-                            "camera_name": cam_name,
-                            "location": cam_loc,
-                            "title": inc_unknown.title,
-                            "description": inc_unknown.description,
-                            "severity": "HIGH",
-                            "risk_score": 75.0,
-                            "status": inc_unknown.status,
-                            "timestamp": ts_str,
-                            "created_at": ts_str,
-                            "evidence_url": snap_url,
-                            "incident": {
-                                "id": inc_unknown.id,
+                                "evidence_url": snap_url,
+                                "alert": {
+                                    "id": al_unknown.id,
+                                    "camera_id": cam_id,
+                                    "camera_number": cam_num,
+                                    "camera_name": cam_name,
+                                    "location": cam_loc,
+                                    "object_class": "person",
+                                    "track_id": f"F-{track.track_id}",
+                                    "confidence": track.confidence,
+                                    "event_type": "UNKNOWN_PERSON_DETECTED",
+                                    "alert_title": "⚠️ UNKNOWN PERSON — VERIFICATION REQUIRED",
+                                    "person_name": "UNKNOWN PERSON",
+                                    "category": "UNKNOWN",
+                                    "severity": "HIGH",
+                                    "risk_score": 75.0,
+                                    "evidence_url": snap_url,
+                                    "timestamp": ts_str,
+                                }
+                            })
+                            await self.ws_manager.broadcast({
+                                "type": "INCIDENT_NEW",
+                                "incident_id": inc_unknown.id,
                                 "incident_number": inc_unknown.incident_number,
+                                "event_id": ev_unknown.id,
+                                "alert_id": al_unknown.id,
                                 "camera_id": cam_id,
                                 "camera_number": cam_num,
                                 "camera_name": cam_name,
+                                "location": cam_loc,
                                 "title": inc_unknown.title,
                                 "description": inc_unknown.description,
                                 "severity": "HIGH",
                                 "risk_score": 75.0,
                                 "status": inc_unknown.status,
-                                "start_time": ts_str,
+                                "timestamp": ts_str,
                                 "created_at": ts_str,
-                            }
-                        })
+                                "evidence_url": snap_url,
+                                "incident": {
+                                    "id": inc_unknown.id,
+                                    "incident_number": inc_unknown.incident_number,
+                                    "camera_id": cam_id,
+                                    "camera_number": cam_num,
+                                    "camera_name": cam_name,
+                                    "title": inc_unknown.title,
+                                    "description": inc_unknown.description,
+                                    "severity": "HIGH",
+                                    "risk_score": 75.0,
+                                    "status": inc_unknown.status,
+                                    "start_time": ts_str,
+                                    "created_at": ts_str,
+                                }
+                            })
+                        else:
+                            # Alert already active for this face track — deduplicate
+                            logger.info(
+                                f"[ALERT_DEDUPLICATED] camera={self.camera_id} face_track_id={track.track_id} "
+                                f"event=UNKNOWN_PERSON_DETECTED existing_alert_id={existing['alert_id']} "
+                                f"reason=track_still_active"
+                            )
+                            db.commit()
 
-                    # Broadcast FACE_DETECTION_UPDATE telemetry
-                    await self.ws_manager.broadcast({
-                        "type": "FACE_DETECTION_UPDATE",
-                        "face_id": face_rec.id,
-                        "camera_id": cam_id,
-                        "camera_number": cam_num,
-                        "camera_name": cam_name,
-                        "location": cam_loc,
-                        "track_id": track.track_id,
-                        "bbox": track.bbox_norm,
-                        "identity_id": track.identity_id,
-                        "identity_name": track.identity_name,
-                        "person_id": p_badge if is_known else None,
-                        "category": p_cat if is_known else "UNKNOWN",
-                        "recognition_status": "VERIFIED" if is_verified_student_staff else "KNOWN" if is_threat_watchlist else "UNKNOWN",
-                        "detection_confidence": track.confidence,
-                        "recognition_confidence": track.recognition_confidence,
-                        "crop_url": crop_url,
-                        "snapshot_url": snap_url,
-                        "quality_score": track.quality_score,
-                        "timestamp": face_rec.timestamp.isoformat()
-                    })
+                    # Broadcast FACE_DETECTION_UPDATE telemetry (always — feeds live canvas overlay)
+                    if do_fd_record:
+                        await self.ws_manager.broadcast({
+                            "type": "FACE_DETECTION_UPDATE",
+                            "face_id": face_rec.id,
+                            "camera_id": cam_id,
+                            "camera_number": cam_num,
+                            "camera_name": cam_name,
+                            "location": cam_loc,
+                            "track_id": track.track_id,
+                            "bbox": track.bbox_norm,
+                            "identity_id": track.identity_id,
+                            "identity_name": track.identity_name,
+                            "person_id": p_badge if is_known else None,
+                            "category": p_cat if is_known else "UNKNOWN",
+                            "recognition_status": "VERIFIED" if is_verified_student_staff else "KNOWN" if is_threat_watchlist else "UNKNOWN",
+                            "detection_confidence": track.confidence,
+                            "recognition_confidence": track.recognition_confidence,
+                            "crop_url": crop_url,
+                            "snapshot_url": snap_url,
+                            "quality_score": track.quality_score,
+                            "timestamp": face_rec.timestamp.isoformat()
+                        })
 
             self.active_faces = faces_payload
             return faces_payload
@@ -1293,17 +1313,30 @@ class AISurveillanceAgent:
                     state = self.track_zone_states[state_key]
 
                     # OUTSIDE -> INSIDE
-                    if inside and not state["is_inside"]:
-                        state["is_inside"] = True
-                        state["entry_time"] = now_sec
-                        state["intrusion_event_generated"] = False
-                        state["loitering_event_generated"] = False
+                    if inside:
+                        self.outside_frame_counts[state_key] = 0
+                        if not state["is_inside"]:
+                            state["is_inside"] = True
+                            state["entry_time"] = now_sec
+                            state["intrusion_event_generated"] = False
+                            state["loitering_event_generated"] = False
 
-                    # INSIDE -> OUTSIDE
+                    # INSIDE -> OUTSIDE with hysteresis debouncing
                     elif not inside and state["is_inside"]:
-                        state["is_inside"] = False
-                        state["intrusion_event_generated"] = False
-                        state["loitering_event_generated"] = False
+                        self.outside_frame_counts[state_key] = self.outside_frame_counts.get(state_key, 0) + 1
+                        if self.outside_frame_counts[state_key] >= ZONE_EXIT_DEBOUNCE_FRAMES:
+                            state["is_inside"] = False
+                            state["intrusion_event_generated"] = False
+                            state["loitering_event_generated"] = False
+                            # Clear active alert keys so re-entry after verified exit triggers a fresh alert
+                            ev_key = f"{self.camera_id}_{obj.track_id}_{zone.id}_RESTRICTED_ZONE_INTRUSION"
+                            loit_key = f"{self.camera_id}_{obj.track_id}_{zone.id}_ZONE_LOITERING"
+                            cleared_alert = self.active_alert_ids.pop(ev_key, None)
+                            self.active_alert_ids.pop(loit_key, None)
+                            logger.info(
+                                f"[VIOLATION_CLEARED] camera={self.camera_id} track_id={obj.track_id} "
+                                f"zone='{zone.name}' cleared_alert_id={cleared_alert}"
+                            )
 
                     if not state["is_inside"]:
                         continue
@@ -1324,35 +1357,79 @@ class AISurveillanceAgent:
                         if obj.confidence < rule.min_confidence:
                             continue
 
-                        cooldown_window = rule.cooldown_sec if (rule.cooldown_sec and rule.cooldown_sec > 0) else ALERT_COOLDOWN_SEC
                         loitering_thresh = rule.loitering_threshold_sec if (rule.loitering_threshold_sec and rule.loitering_threshold_sec > 0) else LOITERING_THRESHOLD_SEC
                         dwell_inside_sec = now_sec - state["entry_time"]
 
-                        # Check 1: Restricted Zone Intrusion
-                        # - On FIRST ENTRY: fire immediately (intrusion_event_generated == False)
-                        # - CONTINUOUSLY INSIDE: re-fire after every cooldown window
-                        #   (no movement_state guard — the object IS in a restricted zone, alert regardless)
+                        # ── Check 1: Restricted Zone Intrusion ────────────────────────────────
                         event_type = "RESTRICTED_ZONE_INTRUSION"
-                        dedup_key = f"{self.camera_id}_{obj.track_id}_{zone.id}_{event_type}"
-                        time_since_last_alert = now_sec - self.last_alert_times.get(dedup_key, 0)
+                        active_key = f"{self.camera_id}_{obj.track_id}_{zone.id}_{event_type}"
+                        zone_alert_key = (self.camera_id, str(zone.id), event_type)
 
-                        if time_since_last_alert >= cooldown_window:
-                            self.last_alert_times[dedup_key] = now_sec
-                            state["intrusion_event_generated"] = True
-                            await self._create_and_broadcast_alert(
-                                db, cam, zone, obj, event_type, is_night, is_loitering=False, frame=frame, pre_frame=pre_frame
+                        # Check suppression cache (if alert was deleted by operator)
+                        is_suppressed = (
+                            self.suppressed_alert_keys.get(active_key, 0) > now_sec or
+                            self.suppressed_alert_keys.get(f"{self.camera_id}_{zone.id}_{event_type}", 0) > now_sec
+                        )
+                        if is_suppressed:
+                            continue
+
+                        # Check zone-level cooldown to prevent multi-alert spam from track switches
+                        time_since_zone_alert = now_sec - self.zone_last_alert_times.get(zone_alert_key, 0.0)
+                        zone_cooldown_ok = (time_since_zone_alert >= ZONE_INTRUSION_COOLDOWN_SEC)
+
+                        if not state["intrusion_event_generated"]:
+                            if zone_cooldown_ok:
+                                state["intrusion_event_generated"] = True
+                                self.last_alert_times[active_key] = now_sec
+                                self.zone_last_alert_times[zone_alert_key] = now_sec
+                                logger.info(
+                                    f"[TRACK_UPDATED] camera={self.camera_id} track_id={obj.track_id} "
+                                    f"class={obj.class_name} conf={obj.confidence:.2f} zone='{zone.name}' "
+                                    f"event=ZONE_ENTRY"
+                                )
+                                new_alert_id = await self._create_and_broadcast_alert(
+                                    db, cam, zone, obj, event_type, is_night, is_loitering=False,
+                                    frame=frame, pre_frame=pre_frame
+                                )
+                                if new_alert_id:
+                                    self.active_alert_ids[active_key] = new_alert_id
+                            else:
+                                logger.info(
+                                    f"[ALERT_DEDUPLICATED] camera={self.camera_id} track_id={obj.track_id} "
+                                    f"zone='{zone.name}' reason=zone_cooldown_active "
+                                    f"cooldown_remaining={ZONE_INTRUSION_COOLDOWN_SEC - time_since_zone_alert:.1f}s"
+                                )
+                        else:
+                            # ── STILL INSIDE: Deduplicate — do NOT create a new alert ────────
+                            existing_alert_id = self.active_alert_ids.get(active_key, "unknown")
+                            logger.debug(
+                                f"[ALERT_DEDUPLICATED] camera={self.camera_id} track_id={obj.track_id} "
+                                f"zone='{zone.name}' existing_alert_id={existing_alert_id} "
+                                f"reason=track_still_inside dwell={dwell_inside_sec:.1f}s"
                             )
 
-                        # Check 2: Zone Loitering
+                        # ── Check 2: Zone Loitering ───────────────────────────────────────────
                         if dwell_inside_sec >= loitering_thresh and not state["loitering_event_generated"]:
                             event_type = "ZONE_LOITERING"
-                            dedup_key = f"{self.camera_id}_{obj.track_id}_{zone.id}_{event_type}"
-                            if now_sec - self.last_alert_times.get(dedup_key, 0) >= cooldown_window:
-                                self.last_alert_times[dedup_key] = now_sec
+                            loiter_key = f"{self.camera_id}_{obj.track_id}_{zone.id}_{event_type}"
+                            zone_loiter_key = (self.camera_id, str(zone.id), event_type)
+                            time_since_loiter = now_sec - self.zone_last_alert_times.get(zone_loiter_key, 0.0)
+
+                            if not self.active_alert_ids.get(loiter_key) and time_since_loiter >= ZONE_LOITERING_COOLDOWN_SEC:
                                 state["loitering_event_generated"] = True
-                                await self._create_and_broadcast_alert(
-                                    db, cam, zone, obj, event_type, is_night, is_loitering=True, frame=frame, pre_frame=pre_frame
+                                self.last_alert_times[loiter_key] = now_sec
+                                self.zone_last_alert_times[zone_loiter_key] = now_sec
+                                logger.info(
+                                    f"[TRACK_UPDATED] camera={self.camera_id} track_id={obj.track_id} "
+                                    f"class={obj.class_name} dwell={dwell_inside_sec:.1f}s zone='{zone.name}' "
+                                    f"event=LOITERING_THRESHOLD_EXCEEDED"
                                 )
+                                new_loiter_alert_id = await self._create_and_broadcast_alert(
+                                    db, cam, zone, obj, event_type, is_night, is_loitering=True,
+                                    frame=frame, pre_frame=pre_frame
+                                )
+                                if new_loiter_alert_id:
+                                    self.active_alert_ids[loiter_key] = new_loiter_alert_id
 
         except Exception as ex:
             logger.error(f"Error in rule processing on {self.camera_id}: {ex}")
@@ -1364,7 +1441,8 @@ class AISurveillanceAgent:
         event_type: str, is_night: bool, is_loitering: bool,
         frame: Optional[np.ndarray] = None,
         pre_frame: Optional[np.ndarray] = None
-    ):
+    ) -> Optional[str]:
+        """Create one alert+incident+evidence and broadcast WebSocket. Returns alert_id."""
         conditions = {
             "night_mode": is_night,
             "restricted_zone": True,
@@ -1410,6 +1488,7 @@ class AISurveillanceAgent:
             track_id=obj.track_id
         )
         db.add(ev)
+        db.flush()
 
         al = Alert(
             id=str(uuid.uuid4()),
@@ -1438,27 +1517,49 @@ class AISurveillanceAgent:
             }
         )
         db.add(al)
+        db.flush()  # Ensures ev and al exist in SQLite before linking Incident
 
         inc_id = None
         inc = None  # Always initialize — prevents UnboundLocalError when risk_score < 70
         if risk_score >= 70.0:
-            inc_num = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
-            inc = Incident(
-                id=str(uuid.uuid4()),
-                incident_number=inc_num,
-                camera_id=cam.id,
-                alert_id=al.id,      # Direct alert→incident link
-                title=f"{severity} {event_type} in {zone_name}",
-                description=f"Track #{obj.track_id} ({obj.class_name}) triggered {event_type} in {zone_name} ({cam.name})",
-                severity=severity,
-                risk_score=risk_score,
-                status="NEW",
-                start_time=now_dt,
-                created_at=now_dt
-            )
-            db.add(inc)
-            inc_id = inc.id
-            al.incident_id = inc.id
+            # Check for existing active incident on this camera and zone for this event_type
+            active_inc = db.query(Incident).filter(
+                Incident.camera_id == cam.id,
+                Incident.status.in_(["NEW", "ACKNOWLEDGED", "INVESTIGATING"]),
+                Incident.title.like(f"%{event_type}%")
+            ).order_by(Incident.created_at.desc()).first()
+
+            if active_inc:
+                inc = active_inc
+                inc_id = active_inc.id
+                al.incident_id = active_inc.id
+                rel_events = list(active_inc.related_event_ids or [])
+                if ev.id not in rel_events:
+                    rel_events.append(ev.id)
+                    active_inc.related_event_ids = rel_events
+                active_inc.updated_at = now_dt
+                logger.info(f"[INCIDENT_CORRELATED] camera={cam.camera_id} incident_id={inc.id} alert_id={al.id}")
+            else:
+                inc_num = f"INC-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+                inc = Incident(
+                    id=str(uuid.uuid4()),
+                    incident_number=inc_num,
+                    camera_id=cam.id,
+                    alert_id=al.id,      # Direct alert→incident link
+                    title=f"{severity} {event_type} in {zone_name}",
+                    description=f"Track #{obj.track_id} ({obj.class_name}) triggered {event_type} in {zone_name} ({cam.name})",
+                    severity=severity,
+                    risk_score=risk_score,
+                    status="NEW",
+                    related_event_ids=[ev.id],
+                    start_time=now_dt,
+                    created_at=now_dt
+                )
+                db.add(inc)
+                db.flush()  # Ensures inc exists before updating al.incident_id
+                inc_id = inc.id
+                al.incident_id = inc.id
+
 
         file_path, file_url, file_size = None, None, 0
         ev_record = None
@@ -1695,6 +1796,33 @@ class AISurveillanceAgent:
                 }
             })
 
-        logger.info(f"[ALERT CREATED] alert_id={al.id} event={event_type} camera={cam.camera_id} track={obj.track_id} zone='{zone_name}' risk_score={risk_score}")
+        logger.info(f"[ALERT_CREATED] alert_id={al.id} event={event_type} camera={cam.camera_id} track={obj.track_id} zone='{zone_name}' risk_score={risk_score}")
+        logger.info(f"[SECURITY_EVENT_CREATED] event_id={ev.id} type={event_type} camera={cam.camera_id} track_id={obj.track_id}")
         logger.info(f"[WEBSOCKET BROADCAST] type=ALERT_NEW alert_id={al.id} camera={cam.camera_id} event={event_type}")
+        return al.id
+
+    def suppress_alert(self, alert_id: Optional[str] = None, track_id: Optional[int] = None, zone_id: Optional[str] = None, duration_sec: float = 120.0):
+        """Temporarily suppresses recreation of an alert deleted by operator."""
+        now_sec = time.time()
+        until = now_sec + duration_sec
+        if alert_id:
+            self.suppressed_alert_keys[str(alert_id)] = until
+        if track_id is not None and zone_id is not None:
+            self.suppressed_alert_keys[f"{self.camera_id}_{track_id}_{zone_id}_RESTRICTED_ZONE_INTRUSION"] = until
+            self.suppressed_alert_keys[f"{self.camera_id}_{track_id}_{zone_id}_ZONE_LOITERING"] = until
+        if zone_id is not None:
+            self.suppressed_alert_keys[f"{self.camera_id}_{zone_id}_RESTRICTED_ZONE_INTRUSION"] = until
+            self.suppressed_alert_keys[f"{self.camera_id}_{zone_id}_ZONE_LOITERING"] = until
+            self.zone_last_alert_times[(self.camera_id, str(zone_id), "RESTRICTED_ZONE_INTRUSION")] = until
+            self.zone_last_alert_times[(self.camera_id, str(zone_id), "ZONE_LOITERING")] = until
+
+    def suppress_face(self, track_id: Optional[int] = None, identity_name: Optional[str] = None, duration_sec: float = 120.0):
+        """Temporarily suppresses recreation of a face detection deleted by operator."""
+        now_sec = time.time()
+        until = now_sec + duration_sec
+        if track_id is not None:
+            self.suppressed_face_keys[(self.camera_id, track_id)] = until
+        if identity_name:
+            self.suppressed_face_keys[(self.camera_id, identity_name)] = until
+        self.suppressed_face_keys[(self.camera_id, "UNKNOWN")] = until
 

@@ -4,6 +4,8 @@ import time
 import uuid
 import asyncio
 import cv2
+import socket
+import urllib.parse
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -14,10 +16,99 @@ from sqlalchemy.orm import Session
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;1000000|stimeout;1000000|rw_timeout;1000000"
 
 from database.connection import get_db
-from database.schema import Camera, CameraHealth, CameraZone, ZoneRule, AuditLog
+from database.schema import Camera, CameraHealth, CameraZone, ZoneRule, AuditLog, Detection, Track, Event
 from backend.auth import get_current_user, RequireRole
 
 router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
+
+def get_local_server_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.2)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+def diagnose_stream_connection_error(url: str, host: str, port: int, err_code: int = 0) -> str:
+    local_ip = get_local_server_ip()
+    parsed = urllib.parse.urlparse(url)
+    scheme = parsed.scheme.lower()
+    parts = [f"Cannot connect to stream host {host}:{port}."]
+    if scheme == "https":
+        parts.append("Hint: Phone camera apps (like IP Webcam, DroidCam) use 'http://', NOT 'https://'. Replace https:// with http://.")
+    if err_code in [65, 113]:  # EHOSTUNREACH on BSD/Linux
+        parts.append(
+            f"No route to host ({host}). The phone is either not on this IP address or blocked by Wi-Fi Client Isolation. "
+            f"Campus/Office/Hostel Wi-Fi routers block device-to-device communication. "
+            f"Guaranteed Fix: Turn ON 'Mobile Hotspot' on your phone, connect your Mac to your phone's Hotspot Wi-Fi, and use the Hotspot IP shown in IP Webcam. "
+            f"Or select 'WEBCAM' mode to use your built-in Mac FaceTime HD camera immediately."
+        )
+    elif local_ip and "." in local_ip and host and "." in host:
+        local_sub = ".".join(local_ip.split(".")[:3])
+        host_sub = ".".join(host.split(".")[:3])
+        if local_sub != host_sub:
+            parts.append(
+                f"Network Mismatch: Your computer is on Wi-Fi subnet '{local_sub}.x' (IP: {local_ip}), "
+                f"while camera IP is '{host}'. Make sure your phone is connected to the SAME Wi-Fi network (turn off mobile cellular data) and use the exact IP shown in your phone app."
+            )
+        else:
+            parts.append(
+                f"Host {host} did not respond. Check your phone's screen in IP Webcam to verify the exact IP (it may have changed). "
+                f"If on a college/office Wi-Fi, router Client Isolation is blocking device communication. Fix: Turn on your phone's Mobile Hotspot and connect your Mac to it, OR use WEBCAM mode."
+            )
+    else:
+        parts.append("Ensure the camera is powered on and connected to the same local network.")
+    parts.append("Tip: You can also select 'WEBCAM' mode (Device 0) to use your Mac's built-in FaceTime HD camera instantly without any Wi-Fi.")
+    return " ".join(parts)
+
+def validate_stream_url(url: str, protocol: str) -> tuple[bool, Optional[str]]:
+    """
+    Validates stream URL format.
+    Returns (is_valid, error_message).
+    """
+    protocol = protocol.upper()
+    url = url.strip()
+
+    if protocol == "WEBCAM":
+        if url.isdigit():
+            return True, None
+        return False, "Invalid camera URL. For WEBCAM, enter a valid device index (e.g. 0 or 1)."
+
+    if protocol == "MP4":
+        if url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv") or url.startswith("http") or "/" in url or "\\" in url:
+            return True, None
+        return False, "Invalid video path. MP4 source must be a valid video file path or URL."
+
+    # Protocol is RTSP or HTTP IP camera
+    if not (url.startswith("http://") or url.startswith("https://") or url.startswith("rtsp://")):
+        return False, "Invalid camera URL. Enter the complete phone IP address (e.g. http://192.168.1.100:8080/video)."
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname
+        if not host:
+            return False, "Invalid camera URL. Enter the complete phone IP address."
+
+        # Check if host is an IPv4 address
+        ip_parts = host.split(".")
+        if len(ip_parts) == 4:
+            for part in ip_parts:
+                if not part.isdigit() or not (0 <= int(part) <= 255):
+                    return False, "Invalid camera URL. Enter the complete phone IP address."
+        else:
+            # Not a 4-octet IPv4 (e.g. 10.179.43. or incomplete hostname)
+            if any(p == "" for p in ip_parts) or (len(ip_parts) in [2, 3] and all(p.isdigit() for p in ip_parts if p)):
+                return False, "Invalid camera URL. Enter the complete phone IP address."
+
+        if parsed.port is not None and not (1 <= parsed.port <= 65535):
+            return False, "Invalid camera URL. Port must be between 1 and 65535."
+
+        return True, None
+    except Exception:
+        return False, "Invalid camera URL. Enter the complete phone IP address."
 
 def mask_stream_url(url: str) -> str:
     if "rtsp://" in url and "@" in url:
@@ -68,6 +159,65 @@ async def list_cameras(db: Session = Depends(get_db), current_user = Depends(get
             db.commit()
     return cameras
 
+@router.get("/discover-phone-cams")
+def discover_phone_cams(current_user = Depends(get_current_user)):
+    """
+    Quickly scans the local subnet for active IP Webcam (8080), DroidCam (4747), and HTTP MJPEG streams.
+    Returns list of discovered streams.
+    """
+    local_ip = get_local_server_ip()
+    if not local_ip or local_ip == "127.0.0.1" or "." not in local_ip:
+        return {"discovered": [], "local_ip": local_ip, "subnet": "local"}
+
+    prefix = ".".join(local_ip.split(".")[:3]) + "."
+    my_last_octet = int(local_ip.split(".")[3])
+    found_streams = []
+
+    def probe_host(last_octet: int):
+        if last_octet == my_last_octet:
+            return None
+        ip = f"{prefix}{last_octet}"
+        for port, app_name, path in [(8080, "IP Webcam", "/video"), (4747, "DroidCam", "/video"), (8081, "IP Cam", "/video")]:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            try:
+                if s.connect_ex((ip, port)) == 0:
+                    return {
+                        "ip": ip,
+                        "port": port,
+                        "app": app_name,
+                        "stream_url": f"http://{ip}:{port}{path}",
+                        "label": f"{app_name} on {ip}:{port}"
+                    }
+            except Exception:
+                pass
+            finally:
+                s.close()
+        return None
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=60) as executor:
+        results = executor.map(probe_host, range(1, 255))
+        for r in results:
+            if r:
+                found_streams.append(r)
+
+    return {
+        "local_ip": local_ip,
+        "subnet": f"{prefix}x",
+        "discovered": found_streams
+    }
+
+@router.get("/network-info")
+def get_network_info(current_user = Depends(get_current_user)):
+    ip = get_local_server_ip()
+    subnet = ".".join(ip.split(".")[:3]) + ".x" if "." in ip else "local"
+    return {
+        "server_ip": ip,
+        "subnet": subnet,
+        "sample_phone_url": f"http://{subnet.replace('.x', '.<phone_ip>')}:8080/video"
+    }
+
 @router.get("/{camera_id}", response_model=CameraResponse)
 def get_camera(camera_id: str, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     cam = db.query(Camera).filter((Camera.id == camera_id) | (Camera.camera_id == camera_id)).first()
@@ -80,8 +230,23 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_
     stream_url = payload.stream_url.strip()
     if stream_url.startswith("htpp://"): stream_url = "http://" + stream_url[7:]
     elif stream_url.startswith("htp://"): stream_url = "http://" + stream_url[6:]
+
+    # Auto-convert https:// to http:// for phone apps and local network addresses
+    if stream_url.startswith("https://"):
+        try:
+            parsed_u = urllib.parse.urlparse(stream_url)
+            if parsed_u.port in [8080, 4747, 8081, 8000] or (parsed_u.hostname and (parsed_u.hostname.startswith("192.168.") or parsed_u.hostname.startswith("10.") or parsed_u.hostname.startswith("172."))):
+                stream_url = "http://" + stream_url[8:]
+        except Exception:
+            pass
+
     if (stream_url.startswith("http://") or stream_url.startswith("https://")) and not any(stream_url.endswith(x) for x in ["/video", "/shot.jpg", ".mp4", "/mjpeg"]):
         stream_url = stream_url.rstrip("/") + "/video"
+
+    # Validate stream URL format
+    is_valid, validation_err = validate_stream_url(stream_url, payload.protocol)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=validation_err or "Invalid camera URL. Enter the complete phone IP address.")
 
     existing = db.query(Camera).filter(Camera.camera_id == payload.camera_id).first()
     if existing:
@@ -162,32 +327,47 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
     Tests connection to a video source (RTSP, Webcam, or MP4) using OpenCV with a hard 1.5s timeout.
     """
     url = payload.stream_url.strip()
+    proto = payload.protocol.upper()
+
     if (url.startswith("http://") or url.startswith("https://")) and not any(url.endswith(x) for x in ["/video", "/shot.jpg", ".mp4", "/mjpeg"]):
         url = url.rstrip("/") + "/video"
 
+    # Step 1: Format Validation
+    is_valid, validation_err = validate_stream_url(url, proto)
+    if not is_valid:
+        return {
+            "status": "FAILED",
+            "protocol": proto,
+            "stream_url": url,
+            "latency_ms": 0.0,
+            "error_type": "INVALID_URL",
+            "message": validation_err or "Invalid camera URL. Enter the complete phone IP address."
+        }
+
     masked_url = mask_stream_url(url)
-    proto = payload.protocol.upper()
     start_t = time.time()
 
-    # Fast TCP pre-check to avoid OpenCV ffmpeg blocking on unreachable IPs
+    # Step 2: TCP Reachability Pre-check for RTSP/HTTP
     if url.startswith("http://") or url.startswith("https://") or url.startswith("rtsp://"):
         try:
-            import socket, urllib.parse
             parsed = urllib.parse.urlparse(url)
             host = parsed.hostname
             port = parsed.port or (443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else 554)
             if host:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(0.5)
+                s.settimeout(0.8)
                 res = s.connect_ex((host, port))
                 s.close()
                 if res != 0:
+                    err_msg = diagnose_stream_connection_error(url, host, port, err_code=res)
+                    err_type = "HOST_UNREACHABLE" if res in [65, 113, 35, 60, 110] else "WRONG_PORT" if res in [61, 111] else "DIFFERENT_SUBNET"
                     return {
                         "status": "FAILED",
                         "protocol": proto,
                         "stream_url": masked_url,
                         "latency_ms": 0.0,
-                        "message": f"Could not reach IP {host}:{port}. Ensure camera is on the same network."
+                        "error_type": err_type,
+                        "message": err_msg
                     }
         except Exception:
             pass
@@ -259,16 +439,17 @@ def start_camera(camera_id: str, db: Session = Depends(get_db), current_user = D
             if host:
                 af = socket.AF_INET6 if ":" in host else socket.AF_INET
                 s = socket.socket(af, socket.SOCK_STREAM)
-                s.settimeout(0.6)
+                s.settimeout(0.8)
                 res = s.connect_ex((host, port))
                 s.close()
                 if res != 0:
                     cam.status = "ERROR"
                     if cam.health: cam.health.status = "ERROR"
                     db.commit()
+                    err_msg = diagnose_stream_connection_error(url, host, port, err_code=res)
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Cannot connect to stream host {host}:{port}. Check network connectivity and port."
+                        detail=err_msg
                     )
         except HTTPException:
             raise
@@ -349,15 +530,32 @@ def delete_camera(camera_id: str, db: Session = Depends(get_db), current_user = 
     stream_manager.stop_stream(cam.camera_id)
     stream_manager.stop_stream(cam.id)
 
+    cam_id = cam.id
+    camera_code = cam.camera_id
+    cam_name = cam.name
+    cam_loc = cam.location
+
+    # Expire cam from session to avoid conflict with raw SQL execution
+    db.expunge(cam)
+
+    from database.connection import engine
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys = OFF"))
+        conn.execute(text("DELETE FROM zone_rules WHERE zone_id IN (SELECT id FROM camera_zones WHERE camera_id = :cid OR camera_id = :ccode)"), {"cid": cam_id, "ccode": camera_code})
+        for tbl in ["camera_zones", "camera_health", "detections", "tracks", "face_detections", "behavior_events", "anpr_results", "evidence", "alerts", "incidents", "events"]:
+            conn.execute(text(f"DELETE FROM {tbl} WHERE camera_id = :cid OR camera_id = :ccode"), {"cid": cam_id, "ccode": camera_code})
+        conn.execute(text("DELETE FROM cameras WHERE id = :cid OR camera_id = :ccode"), {"cid": cam_id, "ccode": camera_code})
+        conn.execute(text("PRAGMA foreign_keys = ON"))
+
     audit = AuditLog(
         user_id=current_user.id if current_user else None,
         username=current_user.username if current_user else "operator",
         action="DELETE_CAMERA",
         resource="cameras",
-        details={"camera_id": cam.camera_id, "name": cam.name, "location": cam.location}
+        details={"camera_id": camera_code, "name": cam_name, "location": cam_loc}
     )
     db.add(audit)
-    db.delete(cam)
     db.commit()
 
     return {"status": "success", "message": f"Camera {camera_id} deleted successfully."}

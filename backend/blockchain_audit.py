@@ -70,6 +70,7 @@ def create_audit_block(
     Returns:
         The AuditBlock instance (added to session, not yet committed).
     """
+    db.flush()
     last_block = _get_last_block(db)
     previous_hash = last_block.block_hash if last_block else GENESIS_HASH
     block_index = (last_block.block_index + 1) if last_block else 0
@@ -91,6 +92,7 @@ def create_audit_block(
         created_at=now,
     )
     db.add(block)
+    db.flush()
 
     logger.info(
         f"[AUDIT_BLOCK_CREATED] block_index={block_index} event_type={event_type} "

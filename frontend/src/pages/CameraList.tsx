@@ -1,7 +1,47 @@
 import React, { useEffect, useState } from 'react';
-import { Camera, Plus, CheckCircle2, RefreshCw, X, Play, Square, Trash2, Video, AlertTriangle, Shield, Cpu } from 'lucide-react';
+import { Camera, Plus, CheckCircle2, RefreshCw, X, Play, Square, Trash2, Video, AlertTriangle, Shield, Cpu, Wifi, Search } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useLocation } from 'react-router-dom';
+
+const validateClientUrl = (url: string, proto: string): string | null => {
+  if (proto === 'WEBCAM') {
+    if (!url || !url.trim() || !/^\d+$/.test(url.trim())) {
+      return 'Invalid camera URL. For WEBCAM, enter a valid device index (e.g. 0 or 1).';
+    }
+    return null;
+  }
+  if (proto === 'MP4') {
+    if (!url || !url.trim()) {
+      return 'Invalid video path. Please enter a video path or URL.';
+    }
+    return null;
+  }
+  // RTSP / IP CAM
+  const trimmed = (url || '').trim();
+  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://') && !trimmed.startsWith('rtsp://')) {
+    return 'Invalid camera URL. Enter the complete phone IP address.';
+  }
+  try {
+    const parsed = new URL(trimmed.replace(/^rtsp:\/\//i, 'http://'));
+    const host = parsed.hostname;
+    if (!host) {
+      return 'Invalid camera URL. Enter the complete phone IP address.';
+    }
+    const parts = host.split('.');
+    if (parts.length === 4) {
+      for (const part of parts) {
+        if (!part || !/^\d+$/.test(part) || Number(part) < 0 || Number(part) > 255) {
+          return 'Invalid camera URL. Enter the complete phone IP address.';
+        }
+      }
+    } else {
+      return 'Invalid camera URL. Enter the complete phone IP address.';
+    }
+  } catch (e) {
+    return 'Invalid camera URL. Enter the complete phone IP address.';
+  }
+  return null;
+};
 
 export const CameraList: React.FC = () => {
   const [cameras, setCameras] = useState<any[]>([]);
@@ -9,8 +49,11 @@ export const CameraList: React.FC = () => {
   const [testResult, setTestResult] = useState<any>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveredStreams, setDiscoveredStreams] = useState<Array<{ ip: string; port: number; app: string; stream_url: string; label: string }>>([]);
   const [webcamStatus, setWebcamStatus] = useState<string | null>(null);
   const [availableDevices, setAvailableDevices] = useState<Array<{ deviceId: string; label: string; index: number }>>([]);
+  const [networkInfo, setNetworkInfo] = useState<{ server_ip: string; subnet: string; sample_phone_url?: string } | null>(null);
 
   const { token, user } = useAuth();
   const location = useLocation();
@@ -67,8 +110,24 @@ export const CameraList: React.FC = () => {
     }
   };
 
+  const fetchNetworkInfo = async () => {
+    if (!token) return;
+    try {
+      const res = await fetch('/api/cameras/network-info', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setNetworkInfo(data);
+      }
+    } catch (e) {
+      console.warn('Could not fetch server network info:', e);
+    }
+  };
+
   useEffect(() => {
     fetchCameras(true);
+    fetchNetworkInfo();
     enumerateWebcams();
     const timer = setTimeout(() => setLoading(false), 500);
     const interval = setInterval(() => fetchCameras(false), 5000);
@@ -82,9 +141,35 @@ export const CameraList: React.FC = () => {
     };
   }, [token, location]);
 
+  const handleDiscoverPhoneCams = async () => {
+    setDiscovering(true);
+    setErrorMessage(null);
+    setDiscoveredStreams([]);
+    try {
+      const res = await fetch('/api/cameras/discover-phone-cams', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDiscoveredStreams(data.discovered || []);
+        if (!data.discovered || data.discovered.length === 0) {
+          setErrorMessage(`No active phone camera streams found on subnet ${data.subnet || 'your Wi-Fi'}. Make sure your phone's IP Webcam is running with 'Start server' enabled.`);
+        } else {
+          setWebcamStatus(`Found ${data.discovered.length} active camera stream(s) on Wi-Fi!`);
+        }
+      }
+    } catch (e) {
+      setErrorMessage('Failed to scan for phone camera streams.');
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
   const handleSourceTypeChange = (proto: string) => {
     let defaultUrl = '0';
-    if (proto === 'RTSP') defaultUrl = 'rtsp://192.168.1.100:554/live';
+    if (proto === 'RTSP') {
+      defaultUrl = '';
+    }
     if (proto === 'MP4') defaultUrl = 'storage/demo_videos/border_patrol.mp4';
 
     setForm(prev => ({
@@ -103,9 +188,20 @@ export const CameraList: React.FC = () => {
     setErrorMessage(null);
 
     let urlToTest = form.stream_url.trim ? form.stream_url.trim() : form.stream_url;
+    if (urlToTest.startsWith('https://') && (urlToTest.includes(':8080') || urlToTest.includes(':4747') || urlToTest.includes('192.168.') || urlToTest.includes('10.'))) {
+      urlToTest = urlToTest.replace(/^https:\/\//, 'http://');
+      setForm(prev => ({ ...prev, stream_url: urlToTest }));
+    }
     if ((urlToTest.startsWith('http://') || urlToTest.startsWith('https://')) && !urlToTest.includes('/video') && !urlToTest.includes('/shot.jpg') && !urlToTest.endsWith('.mp4')) {
       urlToTest = urlToTest.replace(/\/$/, '') + '/video';
       setForm(prev => ({ ...prev, stream_url: urlToTest }));
+    }
+
+    const valErr = validateClientUrl(urlToTest, form.protocol);
+    if (valErr) {
+      setErrorMessage(valErr);
+      setTesting(false);
+      return;
     }
 
     try {
@@ -152,8 +248,18 @@ export const CameraList: React.FC = () => {
     const camName = form.name || `Camera ${cid}`;
 
     let urlToSave = form.stream_url.trim();
+    if (urlToSave.startsWith('https://') && (urlToSave.includes(':8080') || urlToSave.includes(':4747') || urlToSave.includes('192.168.') || urlToSave.includes('10.'))) {
+      urlToSave = urlToSave.replace(/^https:\/\//, 'http://');
+    }
     if ((urlToSave.startsWith('http://') || urlToSave.startsWith('https://')) && !urlToSave.includes('/video') && !urlToSave.includes('/shot.jpg') && !urlToSave.endsWith('.mp4')) {
       urlToSave = urlToSave.replace(/\/$/, '') + '/video';
+    }
+
+    const valErr = validateClientUrl(urlToSave, form.protocol);
+    if (valErr) {
+      setErrorMessage(valErr);
+      setSubmitting(false);
+      return;
     }
 
     if (form.protocol === 'WEBCAM') {
@@ -178,6 +284,36 @@ export const CameraList: React.FC = () => {
         } else {
           setErrorMessage(`Webcam Error: ${err.message || 'Unable to access camera.'}`);
         }
+        setSubmitting(false);
+        return;
+      }
+    }
+
+    // For RTSP / IP CAM: Enforce connection test before saving
+    if (form.protocol === 'RTSP') {
+      setWebcamStatus('Testing connection to camera stream...');
+      try {
+        const testRes = await fetch('/api/cameras/test-connection', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            protocol: form.protocol,
+            stream_url: urlToSave
+          })
+        });
+        const testData = await testRes.json();
+        if (!testRes.ok || testData.status === 'FAILED') {
+          setErrorMessage(testData.message || 'Cannot connect to stream host. Please verify phone IP and server state.');
+          setWebcamStatus(null);
+          setSubmitting(false);
+          return;
+        }
+      } catch (testErr) {
+        setErrorMessage('Failed to reach stream host. Please check network connection.');
+        setWebcamStatus(null);
         setSubmitting(false);
         return;
       }
@@ -518,6 +654,16 @@ export const CameraList: React.FC = () => {
               </div>
             )}
 
+            {networkInfo && (
+              <div className="p-2.5 bg-slate-900/80 border border-blue-500/30 rounded-lg text-[11px] font-mono flex items-center justify-between text-slate-300">
+                <div className="flex items-center gap-2">
+                  <Wifi className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>IBVAP Server IP: <strong className="text-emerald-400">{networkInfo.server_ip}</strong> (Subnet: <strong className="text-blue-400">{networkInfo.subnet}</strong>)</span>
+                </div>
+                <span className="text-[10px] text-slate-400 hidden sm:inline">Phone must be on same Wi-Fi</span>
+              </div>
+            )}
+
             <form onSubmit={handleWebcamPermissionAndSave} className="space-y-4 font-mono text-xs">
               {/* SOURCE TYPE RADIO SELECTOR */}
               <div className="space-y-2">
@@ -526,40 +672,49 @@ export const CameraList: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => handleSourceTypeChange('WEBCAM')}
-                    className={`p-2.5 rounded-lg border text-center font-bold transition-all flex flex-col items-center gap-1.5 ${
+                    className={`p-2 rounded-lg border text-center font-bold transition-all flex flex-col items-center gap-1 ${
                       form.protocol === 'WEBCAM'
                         ? 'bg-blue-600/20 border-blue-500 text-blue-300'
                         : 'bg-[#0a0d14] border-[#252d42] text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    <Cpu className="w-4 h-4" />
-                    <span>WEBCAM</span>
+                    <div className="flex items-center gap-1.5">
+                      <Cpu className="w-3.5 h-3.5" />
+                      <span>WEBCAM</span>
+                    </div>
+                    <span className="text-[9px] text-emerald-400 font-normal">Mac Camera (Instant)</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => handleSourceTypeChange('RTSP')}
-                    className={`p-2.5 rounded-lg border text-center font-bold transition-all flex flex-col items-center gap-1.5 ${
+                    className={`p-2 rounded-lg border text-center font-bold transition-all flex flex-col items-center gap-1 ${
                       form.protocol === 'RTSP'
                         ? 'bg-blue-600/20 border-blue-500 text-blue-300'
                         : 'bg-[#0a0d14] border-[#252d42] text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    <Video className="w-4 h-4" />
-                    <span>RTSP / IP CAM</span>
+                    <div className="flex items-center gap-1.5">
+                      <Video className="w-3.5 h-3.5" />
+                      <span>RTSP / IP CAM</span>
+                    </div>
+                    <span className="text-[9px] text-blue-400 font-normal">Phone & IP Stream</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => handleSourceTypeChange('MP4')}
-                    className={`p-2.5 rounded-lg border text-center font-bold transition-all flex flex-col items-center gap-1.5 ${
+                    className={`p-2 rounded-lg border text-center font-bold transition-all flex flex-col items-center gap-1 ${
                       form.protocol === 'MP4'
                         ? 'bg-blue-600/20 border-blue-500 text-blue-300'
                         : 'bg-[#0a0d14] border-[#252d42] text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    <Play className="w-4 h-4" />
-                    <span>MP4 VIDEO</span>
+                    <div className="flex items-center gap-1.5">
+                      <Play className="w-3.5 h-3.5" />
+                      <span>MP4 VIDEO</span>
+                    </div>
+                    <span className="text-[9px] text-slate-400 font-normal">Pre-recorded File</span>
                   </button>
                 </div>
               </div>
@@ -650,16 +805,95 @@ export const CameraList: React.FC = () => {
               {form.protocol === 'RTSP' && (
                 <div className="space-y-3 p-3 bg-slate-900/50 border border-[#252d42] rounded-lg">
                   <div>
-                    <label className="text-slate-400 block mb-1">RTSP Stream URL</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-slate-400 block">RTSP / Phone IP Camera Stream URL</label>
+                      {form.stream_url.startsWith('https://') && (
+                        <button
+                          type="button"
+                          onClick={() => setForm(prev => ({ ...prev, stream_url: prev.stream_url.replace(/^https:\/\//, 'http://') }))}
+                          className="text-[10px] text-amber-400 hover:text-amber-300 underline font-semibold"
+                        >
+                          Convert to http:// (Recommended)
+                        </button>
+                      )}
+                    </div>
                     <input
                       type="text"
                       required
                       value={form.stream_url}
                       onChange={(e) => setForm({ ...form, stream_url: e.target.value })}
                       className="w-full bg-[#0a0d14] border border-[#252d42] rounded p-2 text-slate-200 font-mono focus:border-blue-500 outline-none"
-                      placeholder="rtsp://admin:secret@192.168.1.100:554/live"
+                      placeholder="e.g. http://192.168.1.50:8080/video or rtsp://..."
                     />
                   </div>
+
+                  {/* Auto-Discovery & Quick Preset Buttons */}
+                  <div className="space-y-2 pt-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] text-slate-500 uppercase font-semibold">Templates:</span>
+                        <button
+                          type="button"
+                          onClick={() => setForm(prev => ({ ...prev, stream_url: 'http://192.168.1.100:8080/video' }))}
+                          className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-blue-300 rounded text-[10px] border border-blue-500/20"
+                        >
+                          📱 Phone IP Webcam
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setForm(prev => ({ ...prev, stream_url: 'http://192.168.1.100:4747/video' }))}
+                          className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-purple-300 rounded text-[10px] border border-purple-500/20"
+                        >
+                          📱 DroidCam
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleDiscoverPhoneCams}
+                        disabled={discovering}
+                        className="px-2.5 py-1 bg-blue-950/60 hover:bg-blue-900/60 text-blue-300 rounded text-[10px] border border-blue-500/40 flex items-center gap-1 font-bold disabled:opacity-50 transition-colors"
+                      >
+                        <Search className={`w-3 h-3 ${discovering ? 'animate-spin' : ''}`} />
+                        <span>{discovering ? 'SCANNING WI-FI...' : '🔍 AUTO-DISCOVER PHONE ON WI-FI'}</span>
+                      </button>
+                    </div>
+
+                    {discoveredStreams.length > 0 && (
+                      <div className="p-2.5 bg-emerald-950/40 border border-emerald-500/40 rounded-lg space-y-1.5">
+                        <div className="text-[11px] font-bold text-emerald-300 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>DISCOVERED ACTIVE PHONE CAMERAS ON WI-FI:</span>
+                        </div>
+                        <div className="space-y-1">
+                          {discoveredStreams.map((s, idx) => (
+                            <div key={idx} className="flex items-center justify-between bg-slate-900/90 p-1.5 px-2 rounded border border-emerald-500/20 text-xs">
+                              <span className="text-slate-200 font-mono text-[11px]">{s.label} ({s.stream_url})</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setForm(prev => ({ ...prev, stream_url: s.stream_url, name: s.label }));
+                                  setErrorMessage(null);
+                                }}
+                                className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold uppercase transition-colors"
+                              >
+                                Use This Camera
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {form.stream_url.startsWith('https://') && (
+                    <div className="p-2 bg-amber-950/40 border border-amber-500/40 rounded text-[11px] text-amber-300 flex items-start gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
+                      <span>
+                        Phone camera apps (Android IP Webcam / DroidCam) stream over unencrypted <strong>http://</strong>, not https://. Click &quot;Convert to http://&quot; above.
+                      </span>
+                    </div>
+                  )}
 
                   <button
                     type="button"
@@ -668,7 +902,7 @@ export const CameraList: React.FC = () => {
                     className="w-full py-2 bg-[#1a2030] hover:bg-blue-600/30 text-blue-300 border border-[#252d42] rounded font-bold uppercase transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${testing ? 'animate-spin' : ''}`} />
-                    {testing ? 'TESTING RTSP CONNECTION...' : 'TEST RTSP CONNECTION'}
+                    {testing ? 'TESTING RTSP / IP CAM CONNECTION...' : 'TEST RTSP / IP CAM CONNECTION'}
                   </button>
                 </div>
               )}

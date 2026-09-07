@@ -131,6 +131,8 @@ export const FaceView: React.FC = () => {
   // Deletion States for Face Detection History
   const [faceToDelete, setFaceToDelete] = useState<any | null>(null);
   const [isDeletingFace, setIsDeletingFace] = useState<boolean>(false);
+  const [showClearAllFaceModal, setShowClearAllFaceModal] = useState<boolean>(false);
+  const [isClearingAllFaces, setIsClearingAllFaces] = useState<boolean>(false);
 
   const [activeWatchlistAlert, setActiveWatchlistAlert] = useState<any | null>(null);
 
@@ -301,6 +303,28 @@ export const FaceView: React.FC = () => {
       alert('Error deleting face detection.');
     } finally {
       setIsDeletingFace(false);
+    }
+  };
+
+  const handleClearAllFaceDetections = async () => {
+    setIsClearingAllFaces(true);
+    try {
+      const res = await fetch('/api/faces/detections/clear-all', {
+        method: 'POST',
+        headers: getHeaders()
+      });
+      if (res.ok) {
+        setDetections([]);
+        setShowClearAllFaceModal(false);
+        fetchKpis();
+      } else {
+        alert('Failed to clear face detections.');
+      }
+    } catch (err) {
+      console.error('Failed to clear face detections:', err);
+      alert('Error clearing face detections.');
+    } finally {
+      setIsClearingAllFaces(false);
     }
   };
 
@@ -599,6 +623,23 @@ export const FaceView: React.FC = () => {
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Sub-bar for counts and clear all */}
+            <div className="flex items-center justify-between pt-3 border-t border-[#252d42] mt-3 text-xs">
+              <span className="text-slate-400 font-mono">
+                Showing <strong className="text-emerald-400">{detections.length}</strong> face detections
+              </span>
+              {detections.length > 0 && (
+                <button
+                  onClick={() => setShowClearAllFaceModal(true)}
+                  className="px-3 py-1.5 bg-red-950/60 hover:bg-red-900/80 text-red-300 border border-red-500/40 rounded-lg text-xs font-mono font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-red-950/20"
+                  title="Purge all historical face detections"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  CLEAR ALL HISTORY ({detections.length})
+                </button>
+              )}
             </div>
           </div>
 
@@ -1274,6 +1315,70 @@ export const FaceView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Clear All Face Detections Confirmation Modal */}
+      {showClearAllFaceModal && (
+        <div className="fixed inset-0 z-[110] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
+          <div className="bg-[#111622] border border-red-500/50 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-0 animate-in fade-in zoom-in duration-150">
+            <div className="bg-red-950/60 px-6 py-4 border-b border-red-500/30 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-500/20 rounded-lg text-red-400 border border-red-500/40">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-100 text-sm tracking-wide uppercase">PURGE ALL FACE DETECTIONS?</h3>
+                  <p className="text-[11px] text-red-400 font-mono">PERMANENT REMOVAL</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowClearAllFaceModal(false)}
+                disabled={isClearingAllFaces}
+                className="p-1.5 rounded-lg bg-[#0a0d14] text-slate-400 hover:text-white border border-[#252d42]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-xs">
+              <p className="text-slate-300 font-sans leading-relaxed">
+                Are you sure you want to permanently delete all <strong className="text-red-400 font-mono">{detections.length}</strong> historical face detection records and their crop/snapshot image files?
+              </p>
+
+              <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg text-red-300 text-[11px]">
+                ℹ Note: Watchlist enrolled individuals and their reference photos will NOT be affected.
+              </div>
+            </div>
+
+            <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowClearAllFaceModal(false)}
+                disabled={isClearingAllFaces}
+                className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleClearAllFaceDetections}
+                disabled={isClearingAllFaces}
+                className="px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition-all disabled:opacity-50"
+              >
+                {isClearingAllFaces ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Purging...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Purge All History
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

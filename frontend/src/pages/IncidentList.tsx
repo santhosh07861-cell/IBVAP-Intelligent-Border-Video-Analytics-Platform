@@ -13,6 +13,7 @@ export const IncidentList: React.FC = () => {
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState<boolean>(false);
+  const [showClearAllModal, setShowClearAllModal] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const { token } = useAuth();
@@ -115,6 +116,34 @@ export const IncidentList: React.FC = () => {
     }
   };
 
+  const handleClearAllIncidents = async () => {
+    setIsDeleting(true);
+    try {
+      const res = await fetch('/api/incidents/clear-all', {
+        method: 'POST',
+        headers: {
+          ...getHeaders(),
+          'Content-Type': 'application/json'
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIncidents([]);
+        setSelectedIds(new Set());
+        setShowClearAllModal(false);
+        showToast('success', `✓ All ${data.deleted_count || incidents.length} incidents cleared permanently`);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast('error', `⚠ Failed to clear incidents: ${err.detail || 'Server error'}`);
+      }
+    } catch (e: any) {
+      console.error('Clear incidents error:', e);
+      showToast('error', `⚠ Error clearing incidents: ${e.message}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) return;
     setIsDeleting(true);
@@ -191,6 +220,16 @@ export const IncidentList: React.FC = () => {
           <p className="text-xs text-slate-400 font-mono">Correlated Security Incidents, Investigation & Resolution Workflows</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {incidents.length > 0 && (
+            <button
+              onClick={() => setShowClearAllModal(true)}
+              className="px-3 py-1.5 bg-red-950/60 hover:bg-red-900/80 text-red-300 border border-red-500/40 rounded-lg text-xs font-mono font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-red-950/20"
+              title="Purge all incidents from database"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              CLEAR ALL ({incidents.length})
+            </button>
+          )}
           {selectedIds.size > 0 && (
             <button
               onClick={() => setShowBulkDeleteModal(true)}
@@ -444,7 +483,68 @@ export const IncidentList: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Clear All Incidents Modal */}
+      {showClearAllModal && (
+        <div className="fixed inset-0 z-[150] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
+          <div className="bg-[#111622] border border-red-500/50 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-0 animate-in fade-in zoom-in duration-150">
+            <div className="bg-red-950/60 px-6 py-4 border-b border-red-500/30 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-500/20 rounded-lg text-red-400 border border-red-500/40">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-100 text-sm tracking-wide uppercase">PURGE ALL {incidents.length} INCIDENTS?</h3>
+                  <p className="text-[11px] text-red-400 font-mono">PERMANENT DATABASE PURGE</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowClearAllModal(false)}
+                disabled={isDeleting}
+                className="p-1.5 rounded-lg bg-[#0a0d14] text-slate-400 hover:text-white border border-[#252d42]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 text-xs">
+              <p className="text-slate-300">
+                Are you sure you want to permanently purge all <strong className="text-red-400 font-mono">{incidents.length}</strong> security incidents and associated notes from the database?
+              </p>
+              <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg text-red-300 text-[11px]">
+                ⚠ This action cannot be undone. All security incident files and logs will be removed.
+              </div>
+            </div>
+            <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowClearAllModal(false)}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleClearAllIncidents}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition-all disabled:opacity-50"
+              >
+                {isDeleting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Purging...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Purge All Incidents
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
 

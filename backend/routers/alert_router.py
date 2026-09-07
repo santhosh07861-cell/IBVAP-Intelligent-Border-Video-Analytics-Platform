@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database.connection import get_db
-from database.schema import Alert, Event, Camera, AuditLog
+from database.schema import Alert, Event, Camera, AuditLog, Incident
 from backend.auth import get_current_user, RequireRole
 
 router = APIRouter(prefix="/api/alerts", tags=["Alerts"])
@@ -168,7 +168,8 @@ def delete_alert(
 ):
     """
     Permanently deletes a security alert record from the database.
-    Creates an immutable audit log entry.
+    Disassociates any referencing incidents, suppresses live re-triggering,
+    commits the database transaction, and broadcasts ALERT_DELETED.
     """
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
@@ -177,9 +178,14 @@ def delete_alert(
     cam_id = alert.camera_id
     ev_type = alert.event_type
     sev = alert.severity
+    track_id = alert.track_id
+    zone_id = alert.zone_id
     ts = alert.timestamp.isoformat() if alert.timestamp else None
 
-    # Record audit log
+    # 1. Disassociate any incident pointing to this alert
+    db.query(Incident).filter(Incident.alert_id == alert_id).update({Incident.alert_id: None}, synchronize_session=False)
+
+    # 2. Record audit log
     audit = AuditLog(
         user_id=current_user.id if current_user else None,
         username=current_user.username if current_user else "operator",
@@ -190,14 +196,42 @@ def delete_alert(
             "camera_id": cam_id,
             "event_type": ev_type,
             "severity": sev,
+            "track_id": track_id,
+            "zone_id": zone_id,
             "timestamp": ts
         }
     )
     db.add(audit)
 
-    # Delete alert
+    # 3. Suppress live re-triggering on active streams
+    try:
+        from backend.stream_manager import stream_manager
+        stream_manager.suppress_alert_across_workers(
+            camera_id=cam_id,
+            alert_id=alert_id,
+            track_id=track_id,
+            zone_id=zone_id,
+            duration_sec=120.0
+        )
+    except Exception:
+        pass
+
+    # 4. Delete alert and commit transaction
     db.delete(alert)
     db.commit()
+
+    # 5. Broadcast ALERT_DELETED to all connected frontends
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(ws_manager.broadcast({
+                "type": "ALERT_DELETED",
+                "alert_id": alert_id,
+                "deleted_ids": [alert_id]
+            }))
+    except Exception:
+        pass
 
     return {
         "success": True,
@@ -218,16 +252,30 @@ def bulk_delete_alerts(
     if not payload.alert_ids:
         raise HTTPException(status_code=400, detail="No alert IDs provided for deletion")
 
-    if len(payload.alert_ids) > 100:
-        raise HTTPException(status_code=400, detail="Cannot delete more than 100 alerts at once")
+    if len(payload.alert_ids) > 200:
+        raise HTTPException(status_code=400, detail="Cannot delete more than 200 alerts at once")
 
     items = db.query(Alert).filter(Alert.id.in_(payload.alert_ids)).all()
     if not items:
         return {"success": True, "deleted_count": 0, "deleted_ids": [], "message": "No matching alerts found"}
 
+    # 1. Disassociate incidents
+    db.query(Incident).filter(Incident.alert_id.in_(payload.alert_ids)).update({Incident.alert_id: None}, synchronize_session=False)
+
     deleted_ids = []
     for item in items:
         deleted_ids.append(item.id)
+        try:
+            from backend.stream_manager import stream_manager
+            stream_manager.suppress_alert_across_workers(
+                camera_id=item.camera_id,
+                alert_id=item.id,
+                track_id=item.track_id,
+                zone_id=item.zone_id,
+                duration_sec=120.0
+            )
+        except Exception:
+            pass
         db.delete(item)
 
     audit = AuditLog(
@@ -243,10 +291,103 @@ def bulk_delete_alerts(
     db.add(audit)
     db.commit()
 
+    # Broadcast ALERT_DELETED
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(ws_manager.broadcast({
+                "type": "ALERT_DELETED",
+                "deleted_ids": deleted_ids
+            }))
+    except Exception:
+        pass
+
     return {
         "success": True,
         "deleted_count": len(deleted_ids),
         "deleted_ids": deleted_ids,
         "message": f"Successfully deleted {len(deleted_ids)} alert records"
     }
+
+
+class ClearAllAlertsRequest(BaseModel):
+    camera_id: Optional[str] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None
+
+
+@router.post("/clear-all", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def clear_all_alerts(
+    payload: Optional[ClearAllAlertsRequest] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Permanently clears all security alerts from the database.
+    Disassociates incidents and suppresses stream workers.
+    """
+    query = db.query(Alert)
+    if payload:
+        if payload.camera_id and payload.camera_id != "all":
+            query = query.filter(Alert.camera_id == payload.camera_id)
+        if payload.severity and payload.severity != "all":
+            query = query.filter(Alert.severity == payload.severity)
+        if payload.status and payload.status != "all":
+            query = query.filter(Alert.status == payload.status)
+
+    items = query.all()
+    if not items:
+        return {"success": True, "deleted_count": 0, "message": "No alerts found to clear"}
+
+    # Disassociate incidents
+    db.query(Incident).update({Incident.alert_id: None}, synchronize_session=False)
+
+    deleted_count = 0
+    for item in items:
+        try:
+            from backend.stream_manager import stream_manager
+            stream_manager.suppress_alert_across_workers(
+                camera_id=item.camera_id,
+                alert_id=item.id,
+                track_id=item.track_id,
+                zone_id=item.zone_id,
+                duration_sec=120.0
+            )
+        except Exception:
+            pass
+        db.delete(item)
+        deleted_count += 1
+
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="CLEAR_ALL_ALERTS",
+        resource="alerts",
+        details={
+            "deleted_count": deleted_count,
+            "filters": payload.dict() if payload else {}
+        }
+    )
+    db.add(audit)
+    db.commit()
+
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(ws_manager.broadcast({
+                "type": "ALERTS_CLEARED",
+                "deleted_count": deleted_count
+            }))
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "message": f"Successfully cleared {deleted_count} security alerts"
+    }
+
+
 

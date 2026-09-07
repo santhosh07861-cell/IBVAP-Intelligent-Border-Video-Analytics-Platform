@@ -44,6 +44,26 @@ def compute_cardinal_direction(dx: float, dy: float) -> str:
     return "STATIONARY"
 
 
+def compute_iou(box1: List[float], box2: List[float]) -> float:
+    """Computes Intersection-over-Union between two [x, y, w, h] normalized boxes."""
+    if not box1 or not box2 or len(box1) < 4 or len(box2) < 4:
+        return 0.0
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1 + w1, x2 + w2)
+    yi2 = min(y1 + h1, y2 + h2)
+    inter_w = max(0.0, xi2 - xi1)
+    inter_h = max(0.0, yi2 - yi1)
+    inter_area = inter_w * inter_h
+    b1_area = max(0.0, w1) * max(0.0, h1)
+    b2_area = max(0.0, w2) * max(0.0, h2)
+    union_area = b1_area + b2_area - inter_area
+    return inter_area / union_area if union_area > 0.0 else 0.0
+
+
+
 class TrackedObject(pydantic.BaseModel):
     track_id: int
     camera_id: str
@@ -71,13 +91,14 @@ class MultiObjectTracker:
     def __init__(
         self,
         max_disappeared: int = TRACK_MAX_DISAPPEARED,
-        max_distance: float = 0.24,
+        max_distance: float = 0.30,
         confirmation_frames: int = TRACK_CONFIRMATION_FRAMES
     ):
         self.next_track_id = 101
         self.tracks: Dict[int, TrackedObject] = {}
         self.disappeared: Dict[int, int] = {}
         self.class_votes: Dict[int, Counter] = {}  # track_id -> Counter of class names
+        self.recent_lost_tracks: Dict[int, Dict[str, Any]] = {}  # tid -> metadata for smooth re-identification
         self.max_disappeared = max_disappeared
         self.max_distance = max_distance
         self.confirmation_frames = confirmation_frames
@@ -86,6 +107,11 @@ class MultiObjectTracker:
         now = datetime.utcnow()
         now_str = now.isoformat()
 
+        # Clean expired lost tracks (> 30s)
+        expired_lost = [tid for tid, info in self.recent_lost_tracks.items() if (now - info["lost_at"]).total_seconds() > 30.0]
+        for tid in expired_lost:
+            del self.recent_lost_tracks[tid]
+
         if len(raw_detections) == 0:
             for track_id in list(self.disappeared.keys()):
                 self.disappeared[track_id] += 1
@@ -93,6 +119,16 @@ class MultiObjectTracker:
                     if track_id in self.tracks:
                         t = self.tracks[track_id]
                         logger.info(f"[TRACK_LOST] camera={camera_id} track_id={track_id} class={t.class_name} dwell_sec={t.dwell_time_sec}")
+                        self.recent_lost_tracks[track_id] = {
+                            "bbox": t.bbox,
+                            "center": t.center,
+                            "class_name": t.class_name,
+                            "class_id": t.class_id,
+                            "entry_time": t.entry_time,
+                            "hits": t.hits,
+                            "is_confirmed": t.is_confirmed,
+                            "lost_at": now
+                        }
                         del self.tracks[track_id]
                     if track_id in self.disappeared:
                         del self.disappeared[track_id]
@@ -114,17 +150,22 @@ class MultiObjectTracker:
             track_ids = list(self.tracks.keys())
             track_centers = [self.tracks[tid].center for tid in track_ids]
 
-            # Compute distance matrix between existing tracks and new detections
+            # Compute distance matrix between existing tracks and new detections with IoU fusion
             D = []
             for tid, tc in zip(track_ids, track_centers):
                 row = []
                 track_cls = self.tracks[tid].class_name.lower()
+                track_bbox = self.tracks[tid].bbox
                 for ic, det in zip(input_centers, raw_detections):
+                    det_bbox = det.bbox if hasattr(det, 'bbox') else det['bbox']
                     det_cls = (det.class_name if hasattr(det, 'class_name') else det.get('class_name', '')).lower()
                     dist = math.hypot(tc[0] - ic[0], tc[1] - ic[1])
+                    iou = compute_iou(track_bbox, det_bbox)
+                    if iou > 0.15:
+                        dist = min(dist, (1.0 - iou) * 0.25)
                     # Penalize distance if classes do not match (prevents person/object identity swaps)
                     if track_cls != det_cls:
-                        dist += 0.25
+                        dist += 0.35
                     row.append(dist)
                 D.append(row)
 
@@ -242,10 +283,51 @@ class MultiObjectTracker:
         class_id = det.class_id if hasattr(det, 'class_id') else det.get('class_id', 0)
         is_fallback = det.is_fallback if hasattr(det, 'is_fallback') else det.get('is_fallback', False)
 
+        # 1. Attempt to re-activate a recently lost track if close in space and class
+        matched_lost_id = None
+        for l_id, l_info in list(self.recent_lost_tracks.items()):
+            if l_info["class_name"].lower() == class_name.lower():
+                dist = math.hypot(l_info["center"][0] - center[0], l_info["center"][1] - center[1])
+                iou = compute_iou(l_info["bbox"], bbox)
+                if iou > 0.20 or dist < 0.18:
+                    matched_lost_id = l_id
+                    break
+
+        now_str = now.isoformat()
+        if matched_lost_id is not None:
+            tid = matched_lost_id
+            lost_meta = self.recent_lost_tracks.pop(matched_lost_id)
+            track = TrackedObject(
+                track_id=tid,
+                camera_id=camera_id,
+                class_id=class_id,
+                class_name=class_name,
+                bbox=bbox,
+                previous_bbox=lost_meta.get("bbox"),
+                confidence=confidence,
+                center=center,
+                previous_centroid=lost_meta.get("center"),
+                entry_time=lost_meta.get("entry_time", now),
+                last_seen=now,
+                dwell_time_sec=round((now - lost_meta.get("entry_time", now)).total_seconds(), 1),
+                trajectory=[(round(center[0], 3), round(center[1], 3), now_str)],
+                hits=lost_meta.get("hits", 1) + 1,
+                is_confirmed=lost_meta.get("is_confirmed", True),
+                is_fallback=is_fallback,
+                movement_delta=0.0,
+                velocity=0.0,
+                direction="STATIONARY",
+                movement_state="STATIONARY"
+            )
+            self.tracks[tid] = track
+            self.disappeared[tid] = 0
+            self.class_votes[tid] = Counter([class_name])
+            logger.info(f"[TRACK_REIDENTIFIED] camera={camera_id} track_id={tid} class={class_name} dwell_sec={track.dwell_time_sec}")
+            return
+
         tid = self.next_track_id
         self.next_track_id += 1
 
-        now_str = now.isoformat()
         is_conf = (1 >= self.confirmation_frames)
         track = TrackedObject(
             track_id=tid,
@@ -273,3 +355,4 @@ class MultiObjectTracker:
         self.disappeared[tid] = 0
         self.class_votes[tid] = Counter([class_name])
         logger.info(f"[TRACK_CREATED] camera={camera_id} track_id={tid} class={class_name} conf={confidence:.2f} bbox={[round(v, 3) for v in bbox]}")
+

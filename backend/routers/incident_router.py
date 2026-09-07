@@ -6,8 +6,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database.connection import get_db
-from database.schema import Incident, IncidentNote, Evidence, AuditLog, Camera
+from database.schema import Incident, IncidentNote, Evidence, AuditLog, Camera, Alert
 from backend.auth import get_current_user, RequireRole
+import asyncio
 
 router = APIRouter(prefix="/api/incidents", tags=["Incident Management"])
 
@@ -181,6 +182,9 @@ def delete_incident(
     )
     db.add(audit)
 
+    # Disassociate any referencing alerts to maintain referential integrity
+    db.query(Alert).filter(Alert.incident_id == target_id).update({Alert.incident_id: None}, synchronize_session=False)
+
     # Disassociate evidence so snapshots are preserved in gallery
     db.query(Evidence).filter(Evidence.incident_id == target_id).update({Evidence.incident_id: None}, synchronize_session=False)
 
@@ -190,6 +194,18 @@ def delete_incident(
     # Delete incident
     db.delete(inc)
     db.commit()
+
+    # Broadcast deletion event over WebSocket
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "INCIDENT_DELETED",
+                "data": {"incident_id": target_id}
+            }))
+    except Exception:
+        pass
 
     return {
         "success": True,
@@ -222,7 +238,8 @@ def bulk_delete_incidents(
     deleted_ids = []
     for item in items:
         deleted_ids.append(item.id)
-        # Disassociate evidence
+        # Disassociate alerts and evidence
+        db.query(Alert).filter(Alert.incident_id == item.id).update({Alert.incident_id: None}, synchronize_session=False)
         db.query(Evidence).filter(Evidence.incident_id == item.id).update({Evidence.incident_id: None}, synchronize_session=False)
         db.query(IncidentNote).filter(IncidentNote.incident_id == item.id).delete(synchronize_session=False)
         db.delete(item)
@@ -240,10 +257,91 @@ def bulk_delete_incidents(
     db.add(audit)
     db.commit()
 
+    # Broadcast bulk deletion event over WebSocket
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "INCIDENT_DELETED",
+                "data": {"incident_ids": deleted_ids}
+            }))
+    except Exception:
+        pass
+
     return {
         "success": True,
         "deleted_count": len(deleted_ids),
         "deleted_ids": deleted_ids,
         "message": f"Successfully deleted {len(deleted_ids)} incident records"
     }
+
+
+class ClearAllIncidentsRequest(BaseModel):
+    status: Optional[str] = None
+    severity: Optional[str] = None
+    camera_id: Optional[str] = None
+
+
+@router.post("/clear-all", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def clear_all_incidents(
+    payload: Optional[ClearAllIncidentsRequest] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Permanently clears all security incident records from the database.
+    Disassociates linked alerts/evidence and cleans up incident notes.
+    """
+    query = db.query(Incident)
+    if payload:
+        if payload.status and payload.status != "all":
+            query = query.filter(Incident.status == payload.status)
+        if payload.severity and payload.severity != "all":
+            query = query.filter(Incident.severity == payload.severity)
+        if payload.camera_id and payload.camera_id != "all":
+            query = query.filter(Incident.camera_id == payload.camera_id)
+
+    items = query.all()
+    if not items:
+        return {"success": True, "deleted_count": 0, "message": "No incidents found to clear"}
+
+    deleted_count = 0
+    for item in items:
+        db.query(Alert).filter(Alert.incident_id == item.id).update({Alert.incident_id: None}, synchronize_session=False)
+        db.query(Evidence).filter(Evidence.incident_id == item.id).update({Evidence.incident_id: None}, synchronize_session=False)
+        db.query(IncidentNote).filter(IncidentNote.incident_id == item.id).delete(synchronize_session=False)
+        db.delete(item)
+        deleted_count += 1
+
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="CLEAR_ALL_INCIDENTS",
+        resource="incidents",
+        details={
+            "deleted_count": deleted_count,
+            "filters": payload.dict() if payload else {}
+        }
+    )
+    db.add(audit)
+    db.commit()
+
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "INCIDENTS_CLEARED",
+                "deleted_count": deleted_count
+            }))
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "message": f"Successfully cleared {deleted_count} incident records"
+    }
+
 

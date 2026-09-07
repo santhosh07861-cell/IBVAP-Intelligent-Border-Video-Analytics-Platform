@@ -136,10 +136,11 @@ class StreamWorker:
                 consecutive_read_failures += 1
                 self.dropped_frames += 1
                 source_status = getattr(self.source, "status", "ERROR")
-                if consecutive_read_failures >= 10:
+                if consecutive_read_failures == 10 or consecutive_read_failures % 100 == 0:
                     self._update_db_status(source_status, fps=0.0, latency_ms=0.0)
                     logger.warning(f"[CAMERA_DISCONNECTED] camera={self.camera_id} status={source_status} consecutive_failures={consecutive_read_failures} total_dropped={self.dropped_frames}")
-                await asyncio.sleep(0.1)
+                sleep_dur = 1.0 if consecutive_read_failures > 30 else 0.2
+                await asyncio.sleep(sleep_dur)
                 continue
 
             consecutive_read_failures = 0
@@ -369,4 +370,25 @@ class StreamManager:
             worker.stop()
         self.workers.clear()
 
+    def suppress_alert_across_workers(self, camera_id: Optional[str] = None, alert_id: Optional[str] = None, track_id: Optional[int] = None, zone_id: Optional[str] = None, duration_sec: float = 120.0):
+        """Notifies active stream workers to temporarily suppress recreation of deleted alerts."""
+        canonical_id = None
+        if camera_id:
+            canonical_id, _ = self._resolve_camera_identifier(camera_id)
+        for cid, worker in list(self.workers.items()):
+            if canonical_id is None or cid == canonical_id or getattr(worker, "camera_id", "") == canonical_id:
+                if hasattr(worker, "agent") and hasattr(worker.agent, "suppress_alert"):
+                    worker.agent.suppress_alert(alert_id, track_id, zone_id, duration_sec)
+
+    def suppress_face_across_workers(self, camera_id: Optional[str] = None, track_id: Optional[int] = None, identity_name: Optional[str] = None, duration_sec: float = 120.0):
+        """Notifies active stream workers to temporarily suppress recreation of deleted face records."""
+        canonical_id = None
+        if camera_id:
+            canonical_id, _ = self._resolve_camera_identifier(camera_id)
+        for cid, worker in list(self.workers.items()):
+            if canonical_id is None or cid == canonical_id or getattr(worker, "camera_id", "") == canonical_id:
+                if hasattr(worker, "agent") and hasattr(worker.agent, "suppress_face"):
+                    worker.agent.suppress_face(track_id, identity_name, duration_sec)
+
 stream_manager = StreamManager()
+

@@ -26,6 +26,13 @@ FACE_RECOGNITION_INTERVAL_SEC = float(os.getenv("FACE_RECOGNITION_INTERVAL_SEC",
 FACE_TRACK_CONFIRMATION_FRAMES = int(os.getenv("FACE_TRACK_CONFIRMATION_FRAMES", "3"))
 FACE_TRACK_MAX_DISAPPEARED = int(os.getenv("FACE_TRACK_MAX_DISAPPEARED", "15"))
 
+# Import from config to stay in sync (lazy import to avoid circular deps)
+try:
+    from backend.config import WATCHLIST_FACE_CONFIRMATION_FRAMES as _WCF
+    WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES = _WCF
+except ImportError:
+    WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES = int(os.getenv("WATCHLIST_FACE_CONFIRMATION_FRAMES", "2"))
+
 
 def calculate_iou(boxA: List[float], boxB: List[float]) -> float:
     xA = max(boxA[0], boxB[0])
@@ -523,8 +530,16 @@ class RealFaceEngine:
                     track.consecutive_match_person = id_id
                     track.consecutive_match_count = 1
 
-                # Confirm match across temporal frames
-                if track.consecutive_match_count >= 1:
+                logger.debug(
+                    f"[RECOGNITION_PROGRESS] track_id={track.track_id} identity={id_name} "
+                    f"consecutive={track.consecutive_match_count}/{WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES} "
+                    f"similarity={raw_sc:.4f} conf={conf:.3f}"
+                )
+
+                # Require WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES consecutive
+                # high-quality frames before accepting a watchlist match.
+                # This prevents single-frame false positives from triggering alerts.
+                if track.consecutive_match_count >= WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES:
                     track.recognition_status = "KNOWN"
                     track.identity_id = id_id
                     track.identity_name = id_name
@@ -532,8 +547,13 @@ class RealFaceEngine:
                     track.category = p_cat
                     track.recognition_confidence = conf
                     track.raw_similarity = raw_sc
+                    logger.info(
+                        f"[RECOGNITION_CONFIRMED] track_id={track.track_id} identity={id_name} "
+                        f"frames={track.consecutive_match_count} similarity={raw_sc:.4f}"
+                    )
                 else:
-                    track.recognition_status = "UNKNOWN"
+                    # Not yet confirmed — treat as UNCERTAIN until threshold met
+                    track.recognition_status = "UNCERTAIN"
                     track.recognition_confidence = conf
                     track.raw_similarity = raw_sc
             else:

@@ -123,6 +123,9 @@ interface WebSocketContextType {
   telemetryMap: Record<string, DetectionMessage>;
   getCameraTelemetry: (cameraId?: string) => DetectionMessage | null;
   isConnected: boolean;
+  removeAlert: (alertId: string) => void;
+  removeAlerts: (alertIds: string[]) => void;
+  clearAlerts: () => void;
 }
 
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
@@ -144,6 +147,25 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const lastReceivedTimestamp = useRef<string | null>(null);
   const tokenRef = useRef<string | null>(null);
 
+  const removeAlert = useCallback((alertId: string) => {
+    if (!alertId) return;
+    seenAlertIds.current.delete(alertId);
+    setLatestAlerts(prev => prev.filter(a => (a.id || a.alert_id) !== alertId));
+  }, []);
+
+  const removeAlerts = useCallback((alertIds: string[]) => {
+    if (!alertIds || alertIds.length === 0) return;
+    const idSet = new Set(alertIds);
+    alertIds.forEach(id => seenAlertIds.current.delete(id));
+    setLatestAlerts(prev => prev.filter(a => !idSet.has(a.id || a.alert_id)));
+  }, []);
+
+  const clearAlerts = useCallback(() => {
+    seenAlertIds.current.clear();
+    setLatestAlerts([]);
+    setLastAlert(null);
+  }, []);
+
   /**
    * Fetch alerts from backend and merge any missed events into the canonical store.
    * Called after reconnect or page navigation.
@@ -155,8 +177,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
       const url = since
-        ? `/api/alerts?limit=50&since=${encodeURIComponent(since)}`
-        : '/api/alerts?limit=50';
+        ? `/api/alerts?limit=100&since=${encodeURIComponent(since)}`
+        : '/api/alerts?limit=100';
 
       const res = await fetch(url, { headers });
       if (!res.ok) return;
@@ -273,9 +295,26 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
               );
             }
 
+          } else if (data.type === 'ALERT_DELETED') {
+            const raw = data as any;
+            const deletedId = raw.alert_id || raw.data?.alert_id;
+            const deletedIds = raw.deleted_ids || raw.data?.deleted_ids;
+            if (deletedId) {
+              removeAlert(deletedId);
+            } else if (Array.isArray(deletedIds)) {
+              removeAlerts(deletedIds);
+            }
+
+          } else if (data.type === 'ALERTS_CLEARED') {
+            clearAlerts();
+
           } else if (data.type === 'INCIDENT_NEW') {
             const incidentObj = (data as any).incident || data;
             setLastIncident(incidentObj);
+
+          } else if (data.type === 'INCIDENT_DELETED' || data.type === 'INCIDENTS_CLEARED') {
+            // Can be observed by consumers
+            setLastIncident(null);
 
           } else if (data.type === 'ANPR_WATCHLIST_MATCH') {
             const alertObj = normalizeAlertPayload(data);
@@ -321,7 +360,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (ws) ws.close();
       if (pingInterval) clearInterval(pingInterval);
     };
-  }, [fetchAndMergeAlerts]);
+  }, [fetchAndMergeAlerts, removeAlert, removeAlerts, clearAlerts]);
 
   const getCameraTelemetry = (cameraId?: string): DetectionMessage | null => {
     if (!cameraId) return null;
@@ -338,7 +377,10 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         latestAlerts,
         telemetryMap,
         getCameraTelemetry,
-        isConnected
+        isConnected,
+        removeAlert,
+        removeAlerts,
+        clearAlerts
       }}
     >
       {children}

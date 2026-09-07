@@ -6,6 +6,7 @@ Includes secure deletion with audit logging and physical file cleanup.
 
 import os
 import logging
+import asyncio
 from typing import Optional, List
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -309,6 +310,18 @@ def delete_evidence(
 
     logger.info(f"[EVIDENCE] Deleted record {evidence_id} ({obj_class} | {track_id}) by user {current_user.username}")
 
+    # Broadcast deletion event over WebSocket
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "EVIDENCE_DELETED",
+                "data": {"evidence_id": evidence_id}
+            }))
+    except Exception:
+        pass
+
     return {
         "success": True,
         "message": f"Detection evidence #{evidence_id[:8]} deleted successfully",
@@ -362,11 +375,159 @@ def bulk_delete_evidence(
 
     logger.info(f"[EVIDENCE] Bulk deleted {len(deleted_ids)} records by user {current_user.username}")
 
+    # Broadcast bulk deletion event over WebSocket
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "EVIDENCE_DELETED",
+                "data": {"evidence_ids": deleted_ids}
+            }))
+    except Exception:
+        pass
+
     return {
         "success": True,
         "deleted_count": len(deleted_ids),
         "deleted_ids": deleted_ids,
         "message": f"Successfully deleted {len(deleted_ids)} detection records"
+    }
+
+
+class ClearAllEvidenceRequest(BaseModel):
+    camera_id: Optional[str] = None
+    track_id: Optional[str] = None
+    object_class: Optional[str] = None
+
+
+@router.post("/clear-all")
+def clear_all_evidence(
+    payload: Optional[ClearAllEvidenceRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(RequireRole(["Administrator", "Security Operator"]))
+):
+    """
+    Permanently clears all evidence records and cleans up snapshot files.
+    Allows optional filtering by camera_id, track_id, or object_class.
+    """
+    query = db.query(Evidence)
+    if payload and payload.camera_id and payload.camera_id != "all":
+        query = query.filter(Evidence.camera_id == payload.camera_id)
+
+    items = query.all()
+    if not items:
+        return {"success": True, "deleted_count": 0, "message": "No evidence records found to clear"}
+
+    deleted_count = 0
+    files_deleted_count = 0
+    for item in items:
+        if payload and payload.track_id:
+            meta = item.metadata_json or {}
+            if str(meta.get("track_id", "")) != str(payload.track_id):
+                continue
+        if payload and payload.object_class and payload.object_class != "all":
+            meta = item.metadata_json or {}
+            if str(meta.get("object_class", "")).lower() != str(payload.object_class).lower():
+                continue
+
+        if _safe_remove_evidence_file(item.file_path):
+            files_deleted_count += 1
+        db.delete(item)
+        deleted_count += 1
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        username=current_user.username,
+        action="CLEAR_ALL_EVIDENCE",
+        resource="evidence",
+        details={
+            "deleted_count": deleted_count,
+            "files_deleted_count": files_deleted_count,
+            "filters": payload.dict() if payload else {}
+        }
+    )
+    db.add(audit)
+    db.commit()
+
+    logger.info(f"[EVIDENCE] Cleared {deleted_count} evidence records by user {current_user.username}")
+
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "EVIDENCE_CLEARED",
+                "deleted_count": deleted_count
+            }))
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "files_deleted_count": files_deleted_count,
+        "message": f"Successfully cleared {deleted_count} detection evidence records"
+    }
+
+
+@router.delete("/by-track/{track_id}")
+def delete_evidence_by_track(
+    track_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(RequireRole(["Administrator", "Security Operator"]))
+):
+    """
+    Deletes all evidence records associated with a specific Track ID.
+    """
+    items = db.query(Evidence).all()
+    matched = []
+    for item in items:
+        meta = item.metadata_json or {}
+        if str(meta.get("track_id", "")) == str(track_id):
+            matched.append(item)
+
+    if not matched:
+        return {"success": True, "deleted_count": 0, "message": f"No records found for track {track_id}"}
+
+    deleted_count = 0
+    files_deleted_count = 0
+    for item in matched:
+        if _safe_remove_evidence_file(item.file_path):
+            files_deleted_count += 1
+        db.delete(item)
+        deleted_count += 1
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        username=current_user.username,
+        action="DELETE_EVIDENCE_BY_TRACK",
+        resource="evidence",
+        details={
+            "track_id": track_id,
+            "deleted_count": deleted_count,
+            "files_deleted_count": files_deleted_count
+        }
+    )
+    db.add(audit)
+    db.commit()
+
+    try:
+        from backend.main import manager as ws_manager
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "EVIDENCE_DELETED",
+                "data": {"track_id": track_id, "deleted_count": deleted_count}
+            }))
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "files_deleted_count": files_deleted_count,
+        "message": f"Successfully deleted {deleted_count} detections for track {track_id}"
     }
 
 
@@ -420,3 +581,13 @@ def bulk_delete_detections_alias(
     current_user: User = Depends(RequireRole(["Administrator", "Security Operator"]))
 ):
     return bulk_delete_evidence(payload, db=db, current_user=current_user)
+
+
+@detections_router.post("/clear-all")
+def clear_all_detections_alias(
+    payload: Optional[ClearAllEvidenceRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(RequireRole(["Administrator", "Security Operator"]))
+):
+    return clear_all_evidence(payload, db=db, current_user=current_user)
+

@@ -101,15 +101,16 @@ function DeleteConfirmationModal({
   item,
   isDeleting,
   onConfirm,
+  onConfirmTrack,
   onCancel,
 }: {
   item: any;
   isDeleting: boolean;
   onConfirm: () => void;
+  onConfirmTrack?: (trackId: string) => void;
   onCancel: () => void;
 }) {
   if (!item) return null;
-  const dt = item.captured_at ? new Date(item.captured_at) : new Date();
 
   return (
     <div className="fixed inset-0 z-[110] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
@@ -142,6 +143,10 @@ function DeleteConfirmationModal({
 
           <div className="bg-[#0a0d14] p-3.5 rounded-xl border border-[#252d42] space-y-2 text-[11px]">
             <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
+              <span className="text-slate-400">Record ID:</span>
+              <strong className="text-slate-300 font-mono">#{item.id?.substring(0, 8)}</strong>
+            </div>
+            <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
               <span className="text-slate-400">Object:</span>
               <strong className="text-blue-400 uppercase font-bold">
                 {getObjectDisplayLabel(item.display_label || item.object_class)}
@@ -156,10 +161,6 @@ function DeleteConfirmationModal({
               <strong className="text-slate-200">{item.camera_number || item.camera_id}</strong>
             </div>
             <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
-              <span className="text-slate-400">Location:</span>
-              <span className="text-slate-300 truncate max-w-[200px]">{item.location || '—'}</span>
-            </div>
-            <div className="flex justify-between border-b border-[#1a2030] pb-1.5">
               <span className="text-slate-400">Date:</span>
               <span className="text-slate-200 font-mono">{formatISTDate(item.captured_at || item.created_at || item.timestamp)}</span>
             </div>
@@ -170,19 +171,30 @@ function DeleteConfirmationModal({
           </div>
 
           <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg text-red-300 text-[11px]">
-            ⚠ This action is destructive and cannot be undone. An audit log entry will be recorded.
+            ⚠ This action is permanent and cannot be undone. An audit log entry will be recorded.
           </div>
         </div>
 
         {/* Footer Actions */}
-        <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+        <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex flex-wrap items-center justify-end gap-2">
           <button
             onClick={onCancel}
             disabled={isDeleting}
-            className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors disabled:opacity-50"
+            className="px-3.5 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors disabled:opacity-50"
           >
             Cancel
           </button>
+          {item.track_id && onConfirmTrack && item.track_id !== 'N/A' && item.track_id !== '—' && (
+            <button
+              onClick={() => onConfirmTrack(item.track_id)}
+              disabled={isDeleting}
+              className="px-3.5 py-2 bg-amber-950/60 hover:bg-amber-900/80 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all disabled:opacity-50"
+              title="Delete all snapshots from this object track"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete Track #{item.track_id}
+            </button>
+          )}
           <button
             onClick={onConfirm}
             disabled={isDeleting}
@@ -196,7 +208,7 @@ function DeleteConfirmationModal({
             ) : (
               <>
                 <Trash2 className="w-3.5 h-3.5" />
-                Delete
+                Delete This Record
               </>
             )}
           </button>
@@ -270,7 +282,7 @@ function BulkDeleteModal({
             ) : (
               <>
                 <Trash2 className="w-3.5 h-3.5" />
-                Delete All ({count})
+                Delete Selected ({count})
               </>
             )}
           </button>
@@ -279,6 +291,91 @@ function BulkDeleteModal({
     </div>
   );
 }
+
+// ---- Clear All / Purge Backlog Confirmation Modal ----
+function ClearAllEvidenceModal({
+  totalCount,
+  isDeleting,
+  onConfirm,
+  onCancel,
+}: {
+  totalCount: number;
+  isDeleting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[110] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
+      <div className="bg-[#111622] border border-red-500/50 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-0 animate-in fade-in zoom-in duration-150">
+        <div className="bg-red-950/60 px-6 py-4 border-b border-red-500/30 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-red-500/20 rounded-lg text-red-400 border border-red-500/40">
+              <Trash2 className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-slate-100 text-sm tracking-wide uppercase">PURGE ALL {totalCount} DETECTIONS?</h3>
+              <p className="text-[11px] text-red-400 font-mono">COMPLETE BACKLOG PURGE</p>
+            </div>
+          </div>
+          <button
+            onClick={onCancel}
+            disabled={isDeleting}
+            className="p-1.5 rounded-lg bg-[#0a0d14] text-slate-400 hover:text-white border border-[#252d42]"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4 text-xs">
+          <p className="text-slate-300 leading-relaxed font-sans">
+            Are you sure you want to permanently erase all <strong className="text-red-400 font-mono">{totalCount}</strong> detection records and snapshot files from disk storage?
+          </p>
+          <div className="bg-[#0a0d14] p-3 rounded-lg border border-[#252d42] space-y-1.5 text-slate-400 text-[11px]">
+            <div className="flex justify-between">
+              <span>Database Records:</span>
+              <strong className="text-slate-200">{totalCount}</strong>
+            </div>
+            <div className="flex justify-between">
+              <span>Disk Image Cleanup:</span>
+              <strong className="text-emerald-400 font-bold">Enabled (Safe Unlink)</strong>
+            </div>
+          </div>
+          <div className="p-3 bg-red-950/30 border border-red-500/30 rounded-lg text-red-300 text-[11px]">
+            ⚠ This action will completely reset the evidence gallery to zero records. This action cannot be undone.
+          </div>
+        </div>
+
+        <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+          <button
+            onClick={onCancel}
+            disabled={isDeleting}
+            className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={isDeleting}
+            className="px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition-all disabled:opacity-50"
+          >
+            {isDeleting ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                Purging All...
+              </>
+            ) : (
+              <>
+                <Trash2 className="w-3.5 h-3.5" />
+                Purge All Records
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 // ---- Main Page ----
 export const EvidenceGallery: React.FC = () => {
@@ -295,6 +392,7 @@ export const EvidenceGallery: React.FC = () => {
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState<boolean>(false);
+  const [showClearAllModal, setShowClearAllModal] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Filters & Search
@@ -355,9 +453,11 @@ export const EvidenceGallery: React.FC = () => {
     fetchEvidence();
   }, [fetchEvidence]);
 
-  // Real-time: prepend new evidence from WebSocket
+  // Real-time: listen for new evidence and deletions from WebSocket
   useEffect(() => {
-    if (lastMessage && lastMessage.type === 'EVIDENCE_NEW') {
+    if (!lastMessage) return;
+
+    if (lastMessage.type === 'EVIDENCE_NEW') {
       const ws = lastMessage as any;
       const newEv = ws.evidence || {
         id: ws.evidence_id,
@@ -379,6 +479,23 @@ export const EvidenceGallery: React.FC = () => {
       if (newEv.id) {
         setItems((prev) => [newEv, ...prev.filter((x) => x.id !== newEv.id)]);
         setTotalCount((c) => c + 1);
+      }
+    } else if (lastMessage.type === 'EVIDENCE_CLEARED') {
+      setItems([]);
+      setTotalCount(0);
+      setSelectedIds(new Set());
+    } else if (lastMessage.type === 'EVIDENCE_DELETED') {
+      const data = (lastMessage as any).data || {};
+      if (data.evidence_id) {
+        setItems((prev) => prev.filter((x) => x.id !== data.evidence_id));
+        setTotalCount((c) => Math.max(0, c - 1));
+      } else if (data.evidence_ids) {
+        const set = new Set(data.evidence_ids);
+        setItems((prev) => prev.filter((x) => !set.has(x.id)));
+        setTotalCount((c) => Math.max(0, c - set.size));
+      } else if (data.track_id) {
+        setItems((prev) => prev.filter((x) => x.track_id !== data.track_id));
+        setTotalCount((c) => Math.max(0, c - (data.deleted_count || 1)));
       }
     }
   }, [lastMessage]);
@@ -413,11 +530,84 @@ export const EvidenceGallery: React.FC = () => {
         return next;
       });
 
-      showToast('success', `✓ Detection #${targetId.substring(0, 8)} deleted successfully`);
+      showToast('success', `✓ Detection #${targetId.substring(0, 8)} permanently deleted`);
       setItemToDelete(null);
     } catch (err: any) {
       console.error('[EVIDENCE] Delete error:', err);
       showToast('error', `⚠ DELETE FAILED: ${err.message || 'Unable to delete detection'}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Handle track-level deletion
+  const handleDeleteTrackConfirm = async (trackId: string) => {
+    if (!trackId) return;
+    setIsDeleting(true);
+
+    try {
+      const authToken = token || localStorage.getItem('ibvap_token') || localStorage.getItem('token');
+      const headers: Record<string, string> = {};
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const res = await fetch(`/api/evidence/by-track/${encodeURIComponent(trackId)}`, {
+        method: 'DELETE',
+        headers,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText);
+        throw new Error(`Track deletion failed (${res.status}): ${errText}`);
+      }
+
+      const data = await res.json();
+      const count = data.deleted_count || 1;
+      setItems((prev) => prev.filter((it) => it.track_id !== trackId));
+      setTotalCount((c) => Math.max(0, c - count));
+      setItemToDelete(null);
+      showToast('success', `✓ Deleted ${count} detections for Track #${trackId}`);
+    } catch (err: any) {
+      console.error('[EVIDENCE] Track delete error:', err);
+      showToast('error', `⚠ TRACK DELETE FAILED: ${err.message || 'Unable to delete track'}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Handle clear-all deletion
+  const handleClearAllConfirm = async () => {
+    setIsDeleting(true);
+
+    try {
+      const authToken = token || localStorage.getItem('ibvap_token') || localStorage.getItem('token');
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json'
+      };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const res = await fetch('/api/evidence/clear-all', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          camera_id: cameraFilter !== 'all' ? cameraFilter : undefined,
+          object_class: objectFilter !== 'all' ? objectFilter : undefined,
+        })
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText);
+        throw new Error(`Purge failed (${res.status}): ${errText}`);
+      }
+
+      const data = await res.json();
+      setItems([]);
+      setTotalCount(0);
+      setSelectedIds(new Set());
+      setShowClearAllModal(false);
+      showToast('success', `✓ Successfully purged ${data.deleted_count ?? totalCount} detection records`);
+    } catch (err: any) {
+      console.error('[EVIDENCE] Clear all error:', err);
+      showToast('error', `⚠ PURGE FAILED: ${err.message || 'Unable to clear evidence'}`);
     } finally {
       setIsDeleting(false);
     }
@@ -533,6 +723,16 @@ export const EvidenceGallery: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {totalCount > 0 && (
+            <button
+              onClick={() => setShowClearAllModal(true)}
+              className="px-3.5 py-2 bg-red-950/40 hover:bg-red-900/60 text-red-400 hover:text-red-300 rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 border border-red-500/30 transition-all shadow-lg shadow-red-950/20"
+              title="Purge all detection history and images from storage"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Clear All ({totalCount})
+            </button>
+          )}
           {selectedIds.size > 0 && (
             <button
               onClick={() => setShowBulkDeleteModal(true)}
@@ -945,6 +1145,7 @@ export const EvidenceGallery: React.FC = () => {
           item={itemToDelete}
           isDeleting={isDeleting}
           onConfirm={handleDeleteConfirm}
+          onConfirmTrack={handleDeleteTrackConfirm}
           onCancel={() => setItemToDelete(null)}
         />
       )}
@@ -956,6 +1157,16 @@ export const EvidenceGallery: React.FC = () => {
           isDeleting={isDeleting}
           onConfirm={handleBulkDeleteConfirm}
           onCancel={() => setShowBulkDeleteModal(false)}
+        />
+      )}
+
+      {/* ── Clear All / Backlog Purge Dialog ── */}
+      {showClearAllModal && (
+        <ClearAllEvidenceModal
+          totalCount={totalCount}
+          isDeleting={isDeleting}
+          onConfirm={handleClearAllConfirm}
+          onCancel={() => setShowClearAllModal(false)}
         />
       )}
 

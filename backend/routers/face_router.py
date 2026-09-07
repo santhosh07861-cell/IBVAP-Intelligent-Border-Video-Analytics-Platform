@@ -459,6 +459,10 @@ def delete_face_detection(
     if not rec:
         raise HTTPException(status_code=404, detail="Face detection record not found.")
 
+    cam_id = rec.camera_id
+    track_id = rec.track_id
+    id_name = rec.identity_name
+
     # Safely clean up associated crop and snapshot files
     for url in [rec.crop_url, rec.snapshot_url]:
         if url:
@@ -487,6 +491,32 @@ def delete_face_detection(
     db.add(audit)
     db.delete(rec)
     db.commit()
+
+    # Suppress across running workers so camera doesn't recreate it on the next frame
+    try:
+        from backend.stream_manager import stream_manager
+        stream_manager.suppress_face_across_workers(
+            camera_id=cam_id,
+            track_id=track_id,
+            identity_name=id_name,
+            duration_sec=60.0
+        )
+    except Exception:
+        pass
+
+    # Broadcast deletion event over WebSocket
+    try:
+        from backend.main import manager as ws_manager
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "FACE_DETECTION_DELETED",
+                "data": {"detection_id": detection_id}
+            }))
+    except Exception:
+        pass
+
     return {"success": True, "message": "Face detection record deleted successfully.", "deleted_id": detection_id}
 
 
@@ -537,11 +567,114 @@ def bulk_delete_face_detections(
     db.add(audit)
     db.commit()
 
+    # Suppress across running workers so camera doesn't recreate them immediately
+    try:
+        from backend.stream_manager import stream_manager
+        for item in items:
+            stream_manager.suppress_face_across_workers(
+                camera_id=item.camera_id,
+                track_id=item.track_id,
+                identity_name=item.identity_name,
+                duration_sec=60.0
+            )
+    except Exception:
+        pass
+
+    # Broadcast bulk deletion event over WebSocket
+    try:
+        from backend.main import manager as ws_manager
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "FACE_DETECTION_DELETED",
+                "data": {"detection_ids": deleted_ids}
+            }))
+    except Exception:
+        pass
+
     return {
         "success": True,
         "deleted_count": len(deleted_ids),
         "deleted_ids": deleted_ids,
         "message": f"Successfully deleted {len(deleted_ids)} face detection records"
     }
+
+
+class ClearAllFaceRequest(BaseModel):
+    recognition_status: Optional[str] = None
+    camera_id: Optional[str] = None
+
+
+@router.post("/detections/clear-all", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+def clear_all_face_detections(
+    payload: Optional[ClearAllFaceRequest] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """
+    Permanently clears all historical FaceDetection records and associated image files.
+    """
+    query = db.query(FaceDetection)
+    if payload:
+        if payload.recognition_status and payload.recognition_status != "all":
+            query = query.filter(FaceDetection.recognition_status == payload.recognition_status)
+        if payload.camera_id and payload.camera_id != "all":
+            query = query.filter(FaceDetection.camera_id == payload.camera_id)
+
+    items = query.all()
+    if not items:
+        return {"success": True, "deleted_count": 0, "message": "No face records found to clear"}
+
+    deleted_count = 0
+    files_deleted_count = 0
+    for item in items:
+        for url in [item.crop_url, item.snapshot_url]:
+            if url:
+                fname = os.path.basename(url)
+                for sub in ["crops", "snapshots"]:
+                    p = os.path.join("storage/evidence/face", sub, fname)
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                            files_deleted_count += 1
+                        except Exception:
+                            pass
+        db.delete(item)
+        deleted_count += 1
+
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="CLEAR_ALL_FACE_DETECTIONS",
+        resource="face_detections",
+        details={
+            "deleted_count": deleted_count,
+            "files_deleted_count": files_deleted_count,
+            "filters": payload.dict() if payload else {}
+        }
+    )
+    db.add(audit)
+    db.commit()
+
+    try:
+        from backend.main import manager as ws_manager
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(ws_manager.broadcast({
+                "type": "FACE_DETECTIONS_CLEARED",
+                "deleted_count": deleted_count
+            }))
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "files_deleted_count": files_deleted_count,
+        "message": f"Successfully cleared {deleted_count} face detection records"
+    }
+
 
 

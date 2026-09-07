@@ -13,15 +13,20 @@ DETECTION_CONFIDENCE_THRESHOLD = float(os.getenv("DETECTION_CONFIDENCE_THRESHOLD
 NMS_IOU_THRESHOLD = float(os.getenv("NMS_IOU_THRESHOLD", "0.45"))
 
 # Multi-Object Tracker Confirmation Pipeline
-TRACK_CONFIRMATION_FRAMES = int(os.getenv("TRACK_CONFIRMATION_FRAMES", "1"))
-TRACK_MAX_DISAPPEARED = int(os.getenv("TRACK_MAX_DISAPPEARED", "15"))
+TRACK_CONFIRMATION_FRAMES = int(os.getenv("TRACK_CONFIRMATION_FRAMES", "2"))
+TRACK_MAX_DISAPPEARED = int(os.getenv("TRACK_MAX_DISAPPEARED", "20"))
 
 # Evidence Capture & Throttling Configuration
-EVIDENCE_CAPTURE_INTERVAL_SEC = float(os.getenv("EVIDENCE_CAPTURE_INTERVAL_SEC", "2.0"))
+EVIDENCE_CAPTURE_INTERVAL_SEC = float(os.getenv("EVIDENCE_CAPTURE_INTERVAL_SEC", "15.0"))
 
-# Event & Behavior Rule Evaluation
+# Event & Behavior Rule Evaluation & Cooldowns
 LOITERING_THRESHOLD_SEC = float(os.getenv("LOITERING_THRESHOLD_SEC", "10.0"))
-ALERT_COOLDOWN_SEC = float(os.getenv("ALERT_COOLDOWN_SEC", "5.0"))
+ALERT_COOLDOWN_SEC = float(os.getenv("ALERT_COOLDOWN_SEC", "30.0"))
+ZONE_INTRUSION_COOLDOWN_SEC = float(os.getenv("ZONE_INTRUSION_COOLDOWN_SEC", "30.0"))
+ZONE_LOITERING_COOLDOWN_SEC = float(os.getenv("ZONE_LOITERING_COOLDOWN_SEC", "60.0"))
+ZONE_EXIT_DEBOUNCE_FRAMES = int(os.getenv("ZONE_EXIT_DEBOUNCE_FRAMES", "10"))
+FACE_RECORD_COOLDOWN_SEC = float(os.getenv("FACE_RECORD_COOLDOWN_SEC", "60.0"))
+
 
 # ─── ANPR (Automatic Number Plate Recognition) Configuration ─────────────────
 # ANPR_PLATE_CONFIDENCE_THRESHOLD:
@@ -51,3 +56,21 @@ ANPR_TRACK_TIMEOUT = float(os.getenv("ANPR_TRACK_TIMEOUT", "10.0"))
 #   Per-(camera_id, plate_number) cooldown. Prevents creating hundreds of DB records
 #   for a single stationary vehicle. Consistent with face watchlist 30s pattern.
 ANPR_DUPLICATE_COOLDOWN_SEC = float(os.getenv("ANPR_DUPLICATE_COOLDOWN_SEC", "30.0"))
+
+# ─── Face Alert Deduplication Configuration ───────────────────────────────────
+# UNKNOWN_PERSON_ALERT_REFIRE_SEC:
+#   Minimum seconds before a second UNKNOWN_PERSON_DETECTED alert can be created
+#   for the SAME face track_id. Once an alert is active for a track, no new alert
+#   is generated until this interval expires AND the track leaves+re-enters frame.
+#   Default: 300s (5 min). Set to 0 to disable re-alerting entirely.
+UNKNOWN_PERSON_ALERT_REFIRE_SEC = float(os.getenv("UNKNOWN_PERSON_ALERT_REFIRE_SEC", "300.0"))
+
+# WATCHLIST_FACE_ALERT_REFIRE_SEC:
+#   Same cooldown for FACE_WATCHLIST_MATCH events.
+WATCHLIST_FACE_ALERT_REFIRE_SEC = float(os.getenv("WATCHLIST_FACE_ALERT_REFIRE_SEC", "300.0"))
+
+# WATCHLIST_FACE_CONFIRMATION_FRAMES:
+#   Number of consecutive high-quality recognition frames required before a
+#   FACE_WATCHLIST_MATCH alert is generated. Prevents single-frame false positives.
+#   Default: 2 (two consecutive frames with the same identity match).
+WATCHLIST_FACE_CONFIRMATION_FRAMES = int(os.getenv("WATCHLIST_FACE_CONFIRMATION_FRAMES", "2"))

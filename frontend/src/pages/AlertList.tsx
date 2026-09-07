@@ -14,11 +14,12 @@ export const AlertList: React.FC = () => {
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState<boolean>(false);
+  const [showClearAllModal, setShowClearAllModal] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const { token, user } = useAuth();
   // ✅ Consume canonical shared store — latestAlerts is pre-populated by WebSocketContext
-  const { latestAlerts, lastAlert } = useWebSocket();
+  const { latestAlerts, lastAlert, removeAlert, removeAlerts, clearAlerts } = useWebSocket();
   const initializedFromContext = useRef(false);
   const lastAlertIdRef = useRef<string | null>(null);
 
@@ -91,6 +92,7 @@ export const AlertList: React.FC = () => {
         headers: getHeaders()
       });
       if (res.ok) {
+        removeAlert(targetId);
         setAlerts((prev) => prev.filter((a) => (a.id || a.alert_id) !== targetId));
         setSelectedIds((prev) => {
           const next = new Set(prev);
@@ -111,6 +113,35 @@ export const AlertList: React.FC = () => {
     }
   };
 
+  const handleClearAllAlerts = async () => {
+    setIsDeleting(true);
+    try {
+      const res = await fetch('/api/alerts/clear-all', {
+        method: 'POST',
+        headers: {
+          ...getHeaders(),
+          'Content-Type': 'application/json'
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        clearAlerts();
+        setAlerts([]);
+        setSelectedIds(new Set());
+        setShowClearAllModal(false);
+        showToast('success', `✓ All ${data.deleted_count || alerts.length} security alerts purged permanently`);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast('error', `⚠ Failed to clear alerts: ${err.detail || 'Server error'}`);
+      }
+    } catch (e: any) {
+      console.error('Clear alerts error:', e);
+      showToast('error', `⚠ Error clearing alerts: ${e.message}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) return;
     setIsDeleting(true);
@@ -126,7 +157,9 @@ export const AlertList: React.FC = () => {
       });
       if (res.ok) {
         const data = await res.json();
-        const deletedSet = new Set(data.deleted_ids || idsArray);
+        const deletedArr = data.deleted_ids || idsArray;
+        removeAlerts(deletedArr);
+        const deletedSet = new Set(deletedArr);
         setAlerts((prev) => prev.filter((a) => !deletedSet.has(a.id || a.alert_id)));
         setSelectedIds(new Set());
         setShowBulkDeleteModal(false);
@@ -191,10 +224,23 @@ export const AlertList: React.FC = () => {
         <div>
           <h2 className="text-lg font-bold tracking-wider text-slate-100 uppercase flex items-center gap-2">
             <Bell className="w-5 h-5 text-amber-400" /> LIVE ALERTS STREAM
+            <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 font-mono border border-amber-500/30">
+              {alerts.length} RECORDS
+            </span>
           </h2>
-          <p className="text-xs text-slate-400 font-mono">Real-Time Threat Notifications, Watchlist Matches & Operator Acknowledgement Queue</p>
+          <p className="text-xs text-slate-400 font-mono">Real-Time Threat Notifications, Watchlist Matches &amp; Operator Acknowledgement Queue</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {alerts.length > 0 && (
+            <button
+              onClick={() => setShowClearAllModal(true)}
+              className="px-3 py-1.5 bg-red-950/60 hover:bg-red-900/80 text-red-300 border border-red-500/40 rounded-lg text-xs font-mono font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-red-950/20"
+              title="Purge all security alerts from database"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              CLEAR ALL ({alerts.length})
+            </button>
+          )}
           {selectedIds.size > 0 && (
             <button
               onClick={() => setShowBulkDeleteModal(true)}
@@ -206,9 +252,9 @@ export const AlertList: React.FC = () => {
           )}
           <button
             onClick={fetchAlerts}
-            className="px-3 py-1.5 bg-[#1a2030] hover:bg-[#252d42] text-slate-300 rounded-lg text-xs font-mono border border-[#252d42] transition-colors"
+            className="px-3 py-1.5 bg-[#1a2030] hover:bg-[#252d42] text-slate-300 rounded-lg text-xs font-mono border border-[#252d42] transition-colors flex items-center gap-1.5"
           >
-            REFRESH ALERTS
+            <RefreshCw className="w-3.5 h-3.5" /> REFRESH ALERTS
           </button>
         </div>
       </div>
@@ -231,7 +277,7 @@ export const AlertList: React.FC = () => {
                   )}
                 </button>
               </th>
-              <th className="p-3">Timestamp</th>
+              <th className="p-3">Timestamp & Alert ID</th>
               <th className="p-3">Event Type</th>
               <th className="p-3">Camera & Location</th>
               <th className="p-3">Severity</th>
@@ -276,7 +322,13 @@ export const AlertList: React.FC = () => {
                         )}
                       </button>
                     </td>
-                    <td className="p-3 text-slate-300 font-mono">{formatISTDateTime(al.timestamp || al.created_at)}</td>
+                    <td className="p-3 font-mono">
+                      <div className="text-slate-200 font-semibold">{formatISTDateTime(al.timestamp || al.created_at)}</div>
+                      <div className="text-[10px] text-slate-500 font-mono mt-0.5 flex items-center gap-1">
+                        <span className="text-slate-600">ID:</span>
+                        <span className="text-slate-400 font-bold">#{alertId ? alertId.substring(0, 8) : 'N/A'}</span>
+                      </div>
+                    </td>
                     <td className="p-3">
                       <div className="font-bold">
                         {isWatchlist ? (
@@ -480,7 +532,68 @@ export const AlertList: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Clear All Alerts Modal */}
+      {showClearAllModal && (
+        <div className="fixed inset-0 z-[150] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 font-mono">
+          <div className="bg-[#111622] border border-red-500/50 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-0 animate-in fade-in zoom-in duration-150">
+            <div className="bg-red-950/60 px-6 py-4 border-b border-red-500/30 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-500/20 rounded-lg text-red-400 border border-red-500/40">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-100 text-sm tracking-wide uppercase">PURGE ALL {alerts.length} ALERTS?</h3>
+                  <p className="text-[11px] text-red-400 font-mono">PERMANENT DATABASE PURGE</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowClearAllModal(false)}
+                disabled={isDeleting}
+                className="p-1.5 rounded-lg bg-[#0a0d14] text-slate-400 hover:text-white border border-[#252d42]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 text-xs">
+              <p className="text-slate-300">
+                Are you sure you want to permanently purge all <strong className="text-red-400 font-mono">{alerts.length}</strong> security alerts from the database?
+              </p>
+              <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg text-red-300 text-[11px]">
+                ⚠ This action cannot be undone. All operator alerts and threat records will be removed.
+              </div>
+            </div>
+            <div className="bg-[#0a0d14] px-6 py-3.5 border-t border-[#252d42] flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowClearAllModal(false)}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-[#1a2030] hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold uppercase transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleClearAllAlerts}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition-all disabled:opacity-50"
+              >
+                {isDeleting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Purging...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Purge All Alerts
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
 

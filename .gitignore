@@ -82,5 +82,3 @@ storage/test_face_subject.jpg
 # Agent brain / conversation artifacts
 brain/
 
-# One-off test files
-test_persistence_lifecycle.py
