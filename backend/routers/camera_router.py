@@ -355,7 +355,7 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
             port = parsed.port or (443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else 554)
             if host:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(0.8)
+                s.settimeout(0.5)
                 res = s.connect_ex((host, port))
                 s.close()
                 if res != 0:
@@ -373,6 +373,8 @@ def test_connection(payload: TestConnectionRequest, current_user = Depends(get_c
             pass
 
     def _attempt_open():
+        import os
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;1000000|rw_timeout;1000000|timeout;1000000"
         if proto == "WEBCAM":
             dev_idx = int(url) if str(url).isdigit() else 0
             cap = cv2.VideoCapture(dev_idx)
@@ -439,7 +441,7 @@ def start_camera(camera_id: str, db: Session = Depends(get_db), current_user = D
             if host:
                 af = socket.AF_INET6 if ":" in host else socket.AF_INET
                 s = socket.socket(af, socket.SOCK_STREAM)
-                s.settimeout(0.8)
+                s.settimeout(0.5)
                 res = s.connect_ex((host, port))
                 s.close()
                 if res != 0:

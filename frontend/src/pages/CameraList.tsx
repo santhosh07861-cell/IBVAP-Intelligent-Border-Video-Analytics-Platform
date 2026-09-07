@@ -827,6 +827,34 @@ export const CameraList: React.FC = () => {
                     />
                   </div>
 
+                  {/* Subnet Mismatch Live Warning */}
+                  {(() => {
+                    if (form.protocol !== 'RTSP' || !networkInfo?.subnet || !form.stream_url) return null;
+                    const ipMatch = form.stream_url.match(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/);
+                    if (!ipMatch) return null;
+                    const enteredIp = ipMatch[1];
+                    const subnetPrefix = networkInfo.subnet.replace(/x$/, '').replace(/\.$/, '');
+                    if (subnetPrefix && !enteredIp.startsWith(subnetPrefix)) {
+                      return (
+                        <div className="p-2.5 bg-rose-950/60 border border-rose-500/60 rounded-lg text-xs font-mono text-rose-300 space-y-1.5">
+                          <div className="flex items-center gap-1.5 font-bold text-rose-400">
+                            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                            <span>⚠️ NETWORK SUBNET MISMATCH DETECTED</span>
+                          </div>
+                          <p className="text-[11px] text-rose-200">
+                            Your phone URL is pointing to <strong className="text-white underline">{enteredIp}</strong>, but this computer is on <strong className="text-white underline">{networkInfo.server_ip}</strong> (Subnet: {networkInfo.subnet}).
+                          </p>
+                          <p className="text-[10px] text-rose-300/90 leading-relaxed">
+                            Your phone is likely using <strong>Mobile Data (4G/5G)</strong>. For video streaming to work:
+                            <br />• Connect your phone to the <strong>same Wi-Fi</strong> network as this PC, OR
+                            <br />• Turn on <strong>Personal Hotspot</strong> on your phone and connect this PC to it.
+                          </p>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
+
                   {/* Auto-Discovery & Quick Preset Buttons */}
                   <div className="space-y-2 pt-1">
                     <div className="flex flex-wrap items-center justify-between gap-2">
