@@ -6,6 +6,7 @@ import asyncio
 import cv2
 import socket
 import urllib.parse
+import urllib.request
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -13,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 # Force FFmpeg C++ socket layer to fail fast if stream hangs
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;1000000|stimeout;1000000|rw_timeout;1000000"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;1500000|stimeout;1500000|rw_timeout;1500000"
 
 from database.connection import get_db
 from database.schema import Camera, CameraHealth, CameraZone, ZoneRule, AuditLog, Detection, Track, Event
@@ -22,6 +23,7 @@ from backend.auth import get_current_user, RequireRole
 router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
 
 def get_local_server_ip() -> str:
+    """Dynamically resolves the host's primary local IPv4 address."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.2)
@@ -32,36 +34,72 @@ def get_local_server_ip() -> str:
     except Exception:
         return "127.0.0.1"
 
+def normalize_camera_url(url: str, protocol: str = "RTSP") -> tuple[str, str]:
+    """
+    Normalizes camera stream URL and resolves canonical source type ('http_mjpeg', 'rtsp', 'webcam', 'mp4').
+    Preserves exact HTTP / MJPEG / RTSP endpoints without invalid cross-protocol conversions.
+    """
+    url = url.strip()
+    proto = protocol.upper().strip()
+
+    if url.startswith("htpp://"): url = "http://" + url[7:]
+    elif url.startswith("htp://"): url = "http://" + url[6:]
+
+    if proto == "WEBCAM" or url.isdigit():
+        return (str(int(url) if url.isdigit() else 0), "webcam")
+
+    if url.startswith("rtsp://") or url.startswith("rtsps://"):
+        return (url, "rtsp")
+
+    if url.startswith("http://") or url.startswith("https://"):
+        # Auto-convert https:// to http:// for phone apps and local IP addresses
+        if url.startswith("https://"):
+            try:
+                parsed_u = urllib.parse.urlparse(url)
+                if parsed_u.port in [8080, 4747, 8081, 8000, 8554] or (parsed_u.hostname and (parsed_u.hostname.startswith("192.168.") or parsed_u.hostname.startswith("10.") or parsed_u.hostname.startswith("172."))):
+                    url = "http://" + url[8:]
+            except Exception:
+                pass
+
+        if not any(url.endswith(x) for x in ["/video", "/videofeed", "/mjpegfeed", "/mjpeg", "/shot.jpg", ".mp4", ".avi", ".mkv"]):
+            url = url.rstrip("/") + "/video"
+        return (url, "http_mjpeg")
+
+    if proto == "RTSP":
+        return (url, "rtsp")
+
+    if url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv") or "/" in url or "\\" in url or proto == "MP4":
+        return (url, "mp4")
+
+    return (url, "http_mjpeg")
+
 def diagnose_stream_connection_error(url: str, host: str, port: int, err_code: int = 0) -> str:
     local_ip = get_local_server_ip()
     parsed = urllib.parse.urlparse(url)
     scheme = parsed.scheme.lower()
-    parts = [f"Cannot connect to stream host {host}:{port}."]
+    parts = []
+
+    if err_code in [61, 111]:  # ECONNREFUSED
+        parts.append(f"Connection refused: Port {port} is closed on {host}. Make sure the IP Webcam / DroidCam app is running and 'Start Server' is active on the phone.")
+    elif err_code in [65, 113]:  # EHOSTUNREACH
+        parts.append(f"No route to host ({host}). The phone is unreachable or on a different network. Make sure the phone is connected to the same Wi-Fi router (or phone's Mobile Hotspot).")
+    elif err_code in [60, 110, 35]:  # ETIMEDOUT / EAGAIN
+        parts.append(f"Connection timed out: Host {host}:{port} did not respond. Check that your phone screen is on and the IP Webcam server is running.")
+    else:
+        parts.append(f"Cannot connect to stream host {host}:{port} (socket error code: {err_code}).")
+
     if scheme == "https":
-        parts.append("Hint: Phone camera apps (like IP Webcam, DroidCam) use 'http://', NOT 'https://'. Replace https:// with http://.")
-    if err_code in [65, 113]:  # EHOSTUNREACH on BSD/Linux
-        parts.append(
-            f"No route to host ({host}). The phone is either not on this IP address or blocked by Wi-Fi Client Isolation. "
-            f"Campus/Office/Hostel Wi-Fi routers block device-to-device communication. "
-            f"Guaranteed Fix: Turn ON 'Mobile Hotspot' on your phone, connect your Mac to your phone's Hotspot Wi-Fi, and use the Hotspot IP shown in IP Webcam. "
-            f"Or select 'WEBCAM' mode to use your built-in Mac FaceTime HD camera immediately."
-        )
-    elif local_ip and "." in local_ip and host and "." in host:
+        parts.append("Note: Phone camera apps stream over 'http://', NOT 'https://'.")
+
+    if local_ip and "." in local_ip and host and "." in host:
         local_sub = ".".join(local_ip.split(".")[:3])
         host_sub = ".".join(host.split(".")[:3])
         if local_sub != host_sub:
             parts.append(
-                f"Network Mismatch: Your computer is on Wi-Fi subnet '{local_sub}.x' (IP: {local_ip}), "
-                f"while camera IP is '{host}'. Make sure your phone is connected to the SAME Wi-Fi network (turn off mobile cellular data) and use the exact IP shown in your phone app."
+                f"⚠️ Network Subnet Mismatch: Server is on subnet '{local_sub}.x' (IP: {local_ip}), "
+                f"while phone is on '{host}'. Connect both devices to the same Wi-Fi router, or turn on your phone's Mobile Hotspot and connect this PC to it."
             )
-        else:
-            parts.append(
-                f"Host {host} did not respond. Check your phone's screen in IP Webcam to verify the exact IP (it may have changed). "
-                f"If on a college/office Wi-Fi, router Client Isolation is blocking device communication. Fix: Turn on your phone's Mobile Hotspot and connect your Mac to it, OR use WEBCAM mode."
-            )
-    else:
-        parts.append("Ensure the camera is powered on and connected to the same local network.")
-    parts.append("Tip: You can also select 'WEBCAM' mode (Device 0) to use your Mac's built-in FaceTime HD camera instantly without any Wi-Fi.")
+
     return " ".join(parts)
 
 def validate_stream_url(url: str, protocol: str) -> tuple[bool, Optional[str]]:
@@ -99,7 +137,6 @@ def validate_stream_url(url: str, protocol: str) -> tuple[bool, Optional[str]]:
                 if not part.isdigit() or not (0 <= int(part) <= 255):
                     return False, "Invalid camera URL. Enter the complete phone IP address."
         else:
-            # Not a 4-octet IPv4 (e.g. 10.179.43. or incomplete hostname)
             if any(p == "" for p in ip_parts) or (len(ip_parts) in [2, 3] and all(p.isdigit() for p in ip_parts if p)):
                 return False, "Invalid camera URL. Enter the complete phone IP address."
 
@@ -146,8 +183,20 @@ class CameraResponse(BaseModel):
     is_demo: Optional[bool] = False
 
 class TestConnectionRequest(BaseModel):
-    protocol: str  # WEBCAM, RTSP, MP4
+    protocol: str  # WEBCAM, RTSP, MP4, HTTP_MJPEG
     stream_url: str
+
+class TestConnectionResponse(BaseModel):
+    connected: bool
+    status: str
+    source_type: str
+    url: str
+    fps: float
+    width: int
+    height: int
+    latency_ms: float
+    error: Optional[str] = None
+    message: str
 
 @router.get("", response_model=List[CameraResponse])
 async def list_cameras(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
@@ -162,8 +211,8 @@ async def list_cameras(db: Session = Depends(get_db), current_user = Depends(get
 @router.get("/discover-phone-cams")
 def discover_phone_cams(current_user = Depends(get_current_user)):
     """
-    Quickly scans the local subnet for active IP Webcam (8080), DroidCam (4747), and HTTP MJPEG streams.
-    Returns list of discovered streams.
+    Scans the local subnet for active phone IP cameras (IP Webcam: 8080, DroidCam: 4747, RTSP: 8554/554).
+    Validates responsiveness and returns true reachable video stream endpoints.
     """
     local_ip = get_local_server_ip()
     if not local_ip or local_ip == "127.0.0.1" or "." not in local_ip:
@@ -177,17 +226,26 @@ def discover_phone_cams(current_user = Depends(get_current_user)):
         if last_octet == my_last_octet:
             return None
         ip = f"{prefix}{last_octet}"
-        for port, app_name, path in [(8080, "IP Webcam", "/video"), (4747, "DroidCam", "/video"), (8081, "IP Cam", "/video")]:
+        candidates = [
+            (8080, "IP Webcam", "/video"),
+            (4747, "DroidCam", "/video"),
+            (8081, "IP Cam", "/video"),
+            (8554, "RTSP Camera", "/live"),
+            (554, "RTSP Stream", "/stream")
+        ]
+        for port, app_name, path in candidates:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.2)
+            s.settimeout(0.15)
             try:
                 if s.connect_ex((ip, port)) == 0:
+                    scheme = "rtsp" if port in [8554, 554] else "http"
+                    stream_url = f"{scheme}://{ip}:{port}{path}"
                     return {
                         "ip": ip,
                         "port": port,
                         "app": app_name,
-                        "stream_url": f"http://{ip}:{port}{path}",
-                        "label": f"{app_name} on {ip}:{port}"
+                        "stream_url": stream_url,
+                        "label": f"{app_name} ({ip}:{port})"
                     }
             except Exception:
                 pass
@@ -227,24 +285,10 @@ def get_camera(camera_id: str, db: Session = Depends(get_db), current_user = Dep
 
 @router.post("", response_model=CameraResponse, dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
 def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    stream_url = payload.stream_url.strip()
-    if stream_url.startswith("htpp://"): stream_url = "http://" + stream_url[7:]
-    elif stream_url.startswith("htp://"): stream_url = "http://" + stream_url[6:]
-
-    # Auto-convert https:// to http:// for phone apps and local network addresses
-    if stream_url.startswith("https://"):
-        try:
-            parsed_u = urllib.parse.urlparse(stream_url)
-            if parsed_u.port in [8080, 4747, 8081, 8000] or (parsed_u.hostname and (parsed_u.hostname.startswith("192.168.") or parsed_u.hostname.startswith("10.") or parsed_u.hostname.startswith("172."))):
-                stream_url = "http://" + stream_url[8:]
-        except Exception:
-            pass
-
-    if (stream_url.startswith("http://") or stream_url.startswith("https://")) and not any(stream_url.endswith(x) for x in ["/video", "/shot.jpg", ".mp4", "/mjpeg"]):
-        stream_url = stream_url.rstrip("/") + "/video"
+    normalized_url, resolved_type = normalize_camera_url(payload.stream_url, payload.protocol)
 
     # Validate stream URL format
-    is_valid, validation_err = validate_stream_url(stream_url, payload.protocol)
+    is_valid, validation_err = validate_stream_url(normalized_url, payload.protocol)
     if not is_valid:
         raise HTTPException(status_code=400, detail=validation_err or "Invalid camera URL. Enter the complete phone IP address.")
 
@@ -255,7 +299,7 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_
         existing.location = payload.location
         existing.latitude = payload.latitude
         existing.longitude = payload.longitude
-        existing.stream_url = stream_url
+        existing.stream_url = normalized_url
         existing.protocol = payload.protocol.upper()
         existing.is_demo = payload.is_demo
         db.commit()
@@ -270,7 +314,7 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_
         location=payload.location,
         latitude=payload.latitude,
         longitude=payload.longitude,
-        stream_url=stream_url,
+        stream_url=normalized_url,
         protocol=payload.protocol.upper(),
         status="OFFLINE",
         is_demo=payload.is_demo
@@ -321,104 +365,139 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), current_
 
     return cam
 
-@router.post("/test-connection", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+@router.post("/test-connection", response_model=TestConnectionResponse, dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
 def test_connection(payload: TestConnectionRequest, current_user = Depends(get_current_user)):
     """
-    Tests connection to a video source (RTSP, Webcam, or MP4) using OpenCV with a hard 1.5s timeout.
+    Tests real backend-side connection to a video source (HTTP MJPEG, RTSP, Webcam, MP4).
+    Opens the stream, reads real frames, measures actual latency & FPS, and returns comprehensive diagnostic status.
     """
-    url = payload.stream_url.strip()
-    proto = payload.protocol.upper()
-
-    if (url.startswith("http://") or url.startswith("https://")) and not any(url.endswith(x) for x in ["/video", "/shot.jpg", ".mp4", "/mjpeg"]):
-        url = url.rstrip("/") + "/video"
+    normalized_url, source_type = normalize_camera_url(payload.stream_url, payload.protocol)
+    masked_url = mask_stream_url(normalized_url)
 
     # Step 1: Format Validation
-    is_valid, validation_err = validate_stream_url(url, proto)
+    is_valid, validation_err = validate_stream_url(normalized_url, payload.protocol)
     if not is_valid:
+        err_str = validation_err or "Invalid camera URL. Enter the complete phone IP address."
         return {
+            "connected": False,
             "status": "FAILED",
-            "protocol": proto,
-            "stream_url": url,
+            "source_type": source_type,
+            "url": masked_url,
+            "fps": 0.0,
+            "width": 0,
+            "height": 0,
             "latency_ms": 0.0,
-            "error_type": "INVALID_URL",
-            "message": validation_err or "Invalid camera URL. Enter the complete phone IP address."
+            "error": err_str,
+            "message": err_str
         }
 
-    masked_url = mask_stream_url(url)
     start_t = time.time()
 
-    # Step 2: TCP Reachability Pre-check for RTSP/HTTP
-    if url.startswith("http://") or url.startswith("https://") or url.startswith("rtsp://"):
+    # Step 2: TCP Reachability Pre-check for Network Streams (HTTP / RTSP)
+    if normalized_url.startswith("http://") or normalized_url.startswith("https://") or normalized_url.startswith("rtsp://"):
         try:
-            parsed = urllib.parse.urlparse(url)
+            parsed = urllib.parse.urlparse(normalized_url)
             host = parsed.hostname
             port = parsed.port or (443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else 554)
             if host:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                af = socket.AF_INET6 if ":" in host else socket.AF_INET
+                s = socket.socket(af, socket.SOCK_STREAM)
                 s.settimeout(0.5)
                 res = s.connect_ex((host, port))
                 s.close()
                 if res != 0:
-                    err_msg = diagnose_stream_connection_error(url, host, port, err_code=res)
-                    err_type = "HOST_UNREACHABLE" if res in [65, 113, 35, 60, 110] else "WRONG_PORT" if res in [61, 111] else "DIFFERENT_SUBNET"
+                    err_msg = diagnose_stream_connection_error(normalized_url, host, port, err_code=res)
+                    latency = round((time.time() - start_t) * 1000, 1)
                     return {
+                        "connected": False,
                         "status": "FAILED",
-                        "protocol": proto,
-                        "stream_url": masked_url,
-                        "latency_ms": 0.0,
-                        "error_type": err_type,
+                        "source_type": source_type,
+                        "url": masked_url,
+                        "fps": 0.0,
+                        "width": 0,
+                        "height": 0,
+                        "latency_ms": latency,
+                        "error": err_msg,
                         "message": err_msg
                     }
-        except Exception:
+        except Exception as e:
             pass
 
-    def _attempt_open():
-        import os
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;1000000|rw_timeout;1000000|timeout;1000000"
-        if proto == "WEBCAM":
-            dev_idx = int(url) if str(url).isdigit() else 0
-            cap = cv2.VideoCapture(dev_idx)
-        elif proto == "RTSP" or url.startswith("http://") or url.startswith("https://"):
-            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        else:
-            cap = cv2.VideoCapture(url)
+    # Step 3: Real Video Frame Ingestion Test
+    def _attempt_frame_read():
+        from video_engine.ingestion.source import create_video_source
+        temp_src = None
+        try:
+            temp_src = create_video_source("TEST_CONN", payload.protocol, normalized_url)
+            # Read 2 frames to confirm stability
+            ret1, f1 = temp_src.read_frame()
+            if not ret1 or f1 is None:
+                time.sleep(0.05)
+                ret1, f1 = temp_src.read_frame()
 
-        if not cap.isOpened():
-            return False, None
-        ret, frame = cap.read()
-        cap.release()
-        return ret, frame
+            if ret1 and f1 is not None:
+                h, w = f1.shape[:2]
+                fps = getattr(temp_src, "fps", 25.0) or 25.0
+                return True, w, h, fps, None
+            else:
+                return False, 0, 0, 0.0, "Connected to network host, but failed to receive video frames from stream."
+        except Exception as ex:
+            return False, 0, 0, 0.0, str(ex)
+        finally:
+            if temp_src:
+                try:
+                    temp_src.release()
+                except Exception:
+                    pass
 
     try:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=1) as executor:
-            fut = executor.submit(_attempt_open)
-            ret, frame = fut.result(timeout=1.5)
+            fut = executor.submit(_attempt_frame_read)
+            ok, width, height, fps, read_err = fut.result(timeout=2.5)
 
         latency = round((time.time() - start_t) * 1000, 1)
-        if ret and frame is not None:
+        if ok and width > 0 and height > 0:
             return {
+                "connected": True,
                 "status": "SUCCESS",
-                "protocol": proto,
-                "stream_url": masked_url,
+                "source_type": source_type,
+                "url": masked_url,
+                "fps": float(fps),
+                "width": int(width),
+                "height": int(height),
                 "latency_ms": latency,
-                "message": f"Successfully connected to {proto} stream source. Resolution: {frame.shape[1]}x{frame.shape[0]}."
+                "error": None,
+                "message": f"Successfully connected to {source_type} stream source. Resolution: {width}x{height} @ {fps:.1f} FPS (Latency: {latency}ms)."
             }
         else:
+            err_msg = read_err or f"Failed to ingest frames from {masked_url}."
             return {
+                "connected": False,
                 "status": "FAILED",
-                "protocol": proto,
-                "stream_url": masked_url,
+                "source_type": source_type,
+                "url": masked_url,
+                "fps": 0.0,
+                "width": 0,
+                "height": 0,
                 "latency_ms": latency,
-                "message": f"Connected to {proto} source at {masked_url} but failed to receive video frames."
+                "error": err_msg,
+                "message": err_msg
             }
     except Exception as e:
+        latency = round((time.time() - start_t) * 1000, 1)
+        err_msg = f"Stream connection timed out: {e}"
         return {
+            "connected": False,
             "status": "FAILED",
-            "protocol": proto,
-            "stream_url": masked_url,
-            "latency_ms": 1000.0,
-            "message": f"Stream connection timed out or failed: {e}"
+            "source_type": source_type,
+            "url": masked_url,
+            "fps": 0.0,
+            "width": 0,
+            "height": 0,
+            "latency_ms": latency,
+            "error": err_msg,
+            "message": err_msg
         }
 
 @router.post("/{camera_id}/start", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
@@ -434,7 +513,6 @@ def start_camera(camera_id: str, db: Session = Depends(get_db), current_user = D
     url = cam.stream_url.strip()
     if url.startswith("http://") or url.startswith("https://") or url.startswith("rtsp://"):
         try:
-            import socket, urllib.parse
             parsed = urllib.parse.urlparse(url)
             host = parsed.hostname
             port = parsed.port or (443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else 554)

@@ -932,6 +932,53 @@ export const CameraList: React.FC = () => {
                     <RefreshCw className={`w-3.5 h-3.5 ${testing ? 'animate-spin' : ''}`} />
                     {testing ? 'TESTING RTSP / IP CAM CONNECTION...' : 'TEST RTSP / IP CAM CONNECTION'}
                   </button>
+
+                  {/* Real Backend Ingestion Diagnostic Result Card */}
+                  {testResult && (
+                    <div className={`p-3 rounded-lg border text-xs font-mono space-y-1.5 ${
+                      testResult.connected ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200' : 'bg-rose-950/60 border-rose-500/50 text-rose-200'
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 font-bold">
+                          {testResult.connected ? (
+                            <>
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                              <span className="text-emerald-300">STREAM VERIFIED & CONNECTED</span>
+                            </>
+                          ) : (
+                            <>
+                              <AlertTriangle className="w-4 h-4 text-rose-400" />
+                              <span className="text-rose-300">CONNECTION FAILED</span>
+                            </>
+                          )}
+                        </div>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/40 uppercase font-semibold text-slate-300">
+                          {testResult.source_type}
+                        </span>
+                      </div>
+
+                      {testResult.connected ? (
+                        <div className="grid grid-cols-3 gap-2 pt-1 border-t border-emerald-500/20 text-[11px]">
+                          <div>
+                            <span className="text-emerald-400 block text-[9px] uppercase">Resolution</span>
+                            <strong>{testResult.width}x{testResult.height}</strong>
+                          </div>
+                          <div>
+                            <span className="text-emerald-400 block text-[9px] uppercase">Measured FPS</span>
+                            <strong>{typeof testResult.fps === 'number' ? testResult.fps.toFixed(1) : testResult.fps} FPS</strong>
+                          </div>
+                          <div>
+                            <span className="text-emerald-400 block text-[9px] uppercase">Latency</span>
+                            <strong>{testResult.latency_ms} ms</strong>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-rose-300/90 leading-relaxed pt-1 border-t border-rose-500/20">
+                          {testResult.error || testResult.message}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 

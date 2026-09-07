@@ -12,12 +12,12 @@ from database.schema import (
     Camera, CameraHealth, CameraZone, ZoneRule,
     Event, Alert, Incident, Detection
 )
-from video_engine.ingestion.source import VideoSource, MP4VideoSource, WebcamVideoSource, RTSPVideoSource
+from video_engine.ingestion.source import VideoSource, create_video_source
 from event_engine.rules.virtual_fence import point_in_polygon
 from event_engine.risk.scorer import OperationalRiskScorer
 from ai_engine.surveillance_agent import AISurveillanceAgent
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("stream_manager")
 
 # Global inference semaphore — created lazily inside the running event loop
 # to avoid Python 3.12+ asyncio deprecation for module-level Semaphore creation.
@@ -62,13 +62,7 @@ class StreamWorker:
         self.frame_buffer = []  # Ring buffer of (timestamp, frame)
 
     def _create_source(self) -> VideoSource:
-        if self.source_type == "WEBCAM":
-            dev_idx = int(self.source_path) if str(self.source_path).isdigit() else 0
-            return WebcamVideoSource(self.camera_id, dev_idx)
-        elif self.source_type == "RTSP" or self.source_path.startswith("http://") or self.source_path.startswith("https://") or self.source_path.startswith("rtsp://"):
-            return RTSPVideoSource(self.camera_id, self.source_path)
-        else:
-            return MP4VideoSource(self.camera_id, self.source_path)
+        return create_video_source(self.camera_id, self.source_type, self.source_path)
 
     def get_latest_jpeg(self) -> Optional[bytes]:
         return self.latest_jpeg
