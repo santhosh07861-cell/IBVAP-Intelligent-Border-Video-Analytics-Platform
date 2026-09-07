@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Shield, Cpu, Volume2, VolumeX, LogOut, Clock, User, BellRing, Sparkles, Video
+  Shield, Cpu, Volume2, VolumeX, LogOut, Clock, User, BellRing, Video
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../context/WebSocketContext';
@@ -163,18 +163,8 @@ const NavbarComponent: React.FC = () => {
         </div>
       </div>
 
-      {/* ── RIGHT: Demo, Live Grid, User Profile & Logout (Column 3) ─────── */}
+      {/* ── RIGHT: Live Grid, User Profile & Logout (Column 3) ─────── */}
       <div className="justify-self-end flex items-center gap-1.5 sm:gap-2 shrink-0">
-        {/* SIH DEMO CENTER */}
-        <Link
-          to="/demo"
-          className="hidden 2xl:flex items-center gap-1 bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 px-1.5 py-0.5 rounded-lg text-[9.5px] font-bold tracking-wide font-mono transition-colors shrink-0 whitespace-nowrap"
-          title="Open SIH Surveillance Simulation & Demo Center"
-        >
-          <Sparkles className="w-3 h-3 text-amber-400" />
-          <span>SIH DEMO CENTER</span>
-        </Link>
-
         {/* LIVE GRID */}
         <Link
           to="/surveillance"

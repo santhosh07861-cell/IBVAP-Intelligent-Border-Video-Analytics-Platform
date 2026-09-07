@@ -20,7 +20,6 @@ import { Analytics } from './pages/Analytics';
 import { HealthView } from './pages/HealthView';
 import { ModelRegistryView } from './pages/ModelRegistryView';
 import { AuditView } from './pages/AuditView';
-import { DemoControl } from './pages/DemoControl';
 import { EvidenceGallery } from './pages/EvidenceGallery';
 import { TacticalGISMap } from './pages/TacticalGISMap';
 import { BlockchainAudit } from './pages/BlockchainAudit';
@@ -56,7 +55,7 @@ const ProtectedLayout: React.FC = () => {
             <Route path="/models" element={<ModelRegistryView />} />
             <Route path="/audit" element={<AuditView />} />
             <Route path="/blockchain" element={<BlockchainAudit />} />
-            <Route path="/demo" element={<DemoControl />} />
+            <Route path="/demo" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </main>

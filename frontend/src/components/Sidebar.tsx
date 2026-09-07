@@ -4,7 +4,7 @@ import { useWebSocket } from '../context/WebSocketContext';
 import {
   LayoutDashboard, Video, Globe, Camera, Shapes, Bell, AlertOctagon,
   FileText, UserCheck, BarChart3, HeartPulse, Cpu,
-  ShieldCheck, PlaySquare, Scan, Link2
+  ShieldCheck, Scan, Link2
 } from 'lucide-react';
 
 const navItems = [
@@ -22,8 +22,7 @@ const navItems = [
   { path: '/system-health', label: 'System Health', icon: HeartPulse },
   { path: '/models', label: 'AI Model Registry', icon: Cpu },
   { path: '/audit', label: 'Audit Logs', icon: ShieldCheck },
-  { path: '/blockchain', label: 'Blockchain Audit Trail', icon: Link2, highlight: 'blockchain' },
-  { path: '/demo', label: 'SIH Demo Center', icon: PlaySquare, highlight: true }
+  { path: '/blockchain', label: 'Blockchain Audit Trail', icon: Link2, highlight: 'blockchain' }
 ];
 
 export const Sidebar: React.FC = () => {
