@@ -253,7 +253,7 @@ export const Dashboard: React.FC = () => {
             cameraName={primaryCamera?.name || "PRIMARY BORDER FEED"}
             detections={primaryTelemetry?.detections || []}
             faces={primaryTelemetry?.faces || []}
-            fps={primaryOnline ? (primaryTelemetry?.fps || primaryCamera?.fps || 25.0) : 0.0}
+            fps={primaryOnline ? (primaryTelemetry?.fps || 0.0) : 0.0}
             latencyMs={primaryTelemetry?.latency_ms || 0.0}
             inferenceMode={primaryOnline ? (primaryTelemetry?.inference_mode || 'REAL AI | INFERENCE RUNNING') : 'CAMERA OFFLINE'}
             cameraRole="primary"

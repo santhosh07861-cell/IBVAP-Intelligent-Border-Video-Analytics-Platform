@@ -105,6 +105,24 @@ class AISurveillanceAgent:
         self.suppressed_alert_keys: Dict[str, float] = {}
         self.suppressed_face_keys: Dict[Any, float] = {}
 
+    def cleanup_live_session(self):
+        """
+        Cleans up all temporary live-session data when camera stream stops or disconnects.
+        Historical records in database remain intact.
+        """
+        self.active_faces = []
+        self.active_anpr = []
+        self.face_tracker.tracks.clear()
+        self.face_alert_state.clear()
+        self.track_zone_states.clear()
+        self.active_alert_ids.clear()
+        self.outside_frame_counts.clear()
+        self.last_face_db_record_times.clear()
+        self.last_detection_snapshot_times.clear()
+        self.last_anpr_process_times.clear()
+        self.last_anpr_db_times.clear()
+        self.last_face_process_time = 0.0
+        logger.info(f"[CAMERA_CLEANUP] Live surveillance & face session reset for camera={self.camera_id}")
 
     async def process_frame(self, frame: np.ndarray, loop_start_time: float, pre_frame: Optional[np.ndarray] = None) -> Tuple[List[TrackedObject], float, float, List[Dict[str, Any]], List[Dict[str, Any]]]:
         if frame is None or frame.size == 0:
@@ -166,6 +184,7 @@ class AISurveillanceAgent:
             return self.active_faces
 
         self.last_face_process_time = now_sec
+        logger.info(f"[FACE] inference started camera={self.camera_id}")
 
         # 1. YuNet Face Detection directly on the live video frame (independent of YOLO object boxes)
         loop = asyncio.get_event_loop()
@@ -173,6 +192,8 @@ class AISurveillanceAgent:
             self._io_executor,
             lambda: self.face_engine.detect_faces(frame)
         )
+
+        logger.info(f"[FACE] faces detected: {len(detected_faces)} camera={self.camera_id}")
 
         # 2. Multi-Frame Spatial Face Tracking
         confirmed_tracks: List[FaceTrack] = self.face_tracker.update(detected_faces)
@@ -192,8 +213,11 @@ class AISurveillanceAgent:
 
             faces_payload = []
             for track in confirmed_tracks:
+                logger.info(f"[FACE] face quality: {track.quality_score:.2f} track={track.track_id}")
                 # 3. SFace Feature Extraction & Watchlist Comparison
                 track = self.face_engine.evaluate_track_recognition(frame, track, watchlist_records)
+                logger.info(f"[FACE] embedding generated track={track.track_id}")
+                logger.info(f"[FACE] recognition result track={track.track_id} status={track.recognition_status} identity={track.identity_name or 'UNKNOWN'} similarity={track.recognition_confidence:.3f}")
 
                 is_known = (track.recognition_status == "KNOWN" and track.identity_name is not None)
                 p_badge = getattr(track, "person_id", None) or (f"ID-{track.track_id}")
@@ -299,6 +323,7 @@ class AISurveillanceAgent:
                         timestamp=now_dt
                     )
                     db.add(face_rec)
+                    logger.info(f"[FACE] database insert/update id={face_rec.id} camera={cam_num} track={track.track_id} status={face_rec.recognition_status}")
 
                     # 2. Case A: Verified Student/Staff -> Entry Log ONLY (NO Security Alarm)
                     if is_verified_student_staff:

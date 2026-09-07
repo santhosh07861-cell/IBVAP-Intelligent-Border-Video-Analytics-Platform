@@ -104,8 +104,8 @@ export const Surveillance: React.FC = () => {
         }`}>
           {displayCams.map((cam) => {
             const telem = getCameraTelemetry(cam.camera_id);
-            const isCamOnline = cam.status === 'ONLINE' || (telem?.fps || 0) > 0;
-            const camFps = isCamOnline ? (telem?.fps || cam.fps || 25.0) : 0.0;
+            const isCamOnline = (cam.status === 'ONLINE' || (telem?.fps || 0) > 0) && ((telem?.fps || 0) > 0);
+            const camFps = isCamOnline ? (telem?.fps || 0.0) : 0.0;
             const camLatency = isCamOnline ? (telem?.latency_ms || 0.0) : 0.0;
             const camDets = isCamOnline ? (telem?.detections || []) : [];
             const camFaces = isCamOnline ? (telem?.faces || []) : [];

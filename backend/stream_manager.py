@@ -119,121 +119,152 @@ class StreamWorker:
 
         consecutive_read_failures = 0
 
-        while self.is_running:
-            loop_start = time.time()
+        try:
+            while self.is_running:
+                loop_start = time.time()
+                try:
+                    ret, frame = await loop.run_in_executor(None, self.source.read_frame)
+                except Exception as e:
+                    logger.error(f"Exception during read_frame for {self.camera_id}: {e}")
+                    ret, frame = False, None
+
+                if not ret or frame is None:
+                    consecutive_read_failures += 1
+                    self.dropped_frames += 1
+                    source_status = getattr(self.source, "status", "ERROR")
+                    if consecutive_read_failures == 10 or consecutive_read_failures % 100 == 0:
+                        self._update_db_status(source_status, fps=0.0, latency_ms=0.0)
+                        logger.warning(f"[CAMERA_DISCONNECTED] camera={self.camera_id} status={source_status} consecutive_failures={consecutive_read_failures} total_dropped={self.dropped_frames}")
+                    sleep_dur = 1.0 if consecutive_read_failures > 30 else 0.2
+                    await asyncio.sleep(sleep_dur)
+                    continue
+
+                consecutive_read_failures = 0
+                self.frame_sequence += 1
+                cap_ts = datetime.utcnow().isoformat() + "Z"
+
+                # Apply camera rotation if configured (0°, 90°, 180°, 270°)
+                if self.rotation == 90:
+                    frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                elif self.rotation == 180:
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
+                elif self.rotation == 270:
+                    frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+                # Maintain rolling frame buffer (last 20 frames)
+                self.frame_buffer.append(frame.copy())
+                if len(self.frame_buffer) > 20:
+                    self.frame_buffer.pop(0)
+
+                pre_frame = self.frame_buffer[0] if len(self.frame_buffer) > 5 else None
+
+                # 1. Fast JPEG encoding for video stream (~25 FPS)
+                try:
+                    ok_enc, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                    if ok_enc:
+                        self.latest_jpeg = buf.tobytes()
+                except Exception as e:
+                    logger.error(f"JPEG encode error on {self.camera_id}: {e}")
+
+                frame_count += 1
+                elapsed = time.time() - start_time
+                self.current_fps = round(frame_count / max(1.0, elapsed), 1)
+
+                if frame_count == 1 or frame_count % 100 == 0:
+                    logger.info(f"[CAMERA] frame received camera={self.camera_id} seq={self.frame_sequence} fps={self.current_fps}")
+                    logger.info(f"[CAMERA] frame width/height={frame.shape[1]}x{frame.shape[0]} camera={self.camera_id}")
+
+                # 2. Trigger async AI inference at sampled rate (~8-10 AI FPS), skipping intermediate frames if busy
+                if not self.is_inferencing and (time.time() - self.last_ai_time >= 0.10):
+                    asyncio.create_task(self._async_ai_step(frame.copy(), loop_start, pre_frame=pre_frame))
+
+                # 3. Telemetry WS broadcast (Throttled to 6 Hz per camera)
+                now_ws = time.time()
+                if now_ws - self.last_ws_time >= 0.16:
+                    self.last_ws_time = now_ws
+                    dets_payload = [
+                        {
+                            "track_id": t.track_id,
+                            "class_name": t.class_name,
+                            "confidence": t.confidence,
+                            "bbox": t.bbox,
+                            "previous_bbox": getattr(t, "previous_bbox", None),
+                            "center": t.center,
+                            "previous_centroid": getattr(t, "previous_centroid", None),
+                            "movement_delta": getattr(t, "movement_delta", 0.0),
+                            "velocity": getattr(t, "velocity", 0.0),
+                            "direction": getattr(t, "direction", "STATIONARY"),
+                            "movement_state": getattr(t, "movement_state", "STATIONARY"),
+                            "dwell_time_sec": t.dwell_time_sec,
+                            "is_confirmed": getattr(t, "is_confirmed", False),
+                            "is_fallback": False
+                        } for t in self.latest_tracked_objs
+                    ]
+
+                    ws_payload = {
+                        "type": "DETECTIONS_UPDATE",
+                        "camera_id": self.camera_id,
+                        "frame_sequence": self.frame_sequence,
+                        "dropped_frames": self.dropped_frames,
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "inference_mode": "REAL AI | INFERENCE RUNNING",
+                        "detections": dets_payload,
+                        "faces": self.latest_face_objs,
+                        "anpr": getattr(self, 'latest_anpr_objs', []),
+                        "fps": self.current_fps,
+                        "latency_ms": self.latest_latency_ms
+                    }
+
+                    try:
+                        await self.ws_manager.broadcast(ws_payload)
+                    except Exception as e:
+                        logger.debug(f"WS broadcast error for {self.camera_id}: {e}")
+
+                # 4. Throttled DB status updates (once every 2.5 seconds)
+                if time.time() - self.last_db_update_time >= 2.5:
+                    self._update_db_status("ONLINE", fps=self.current_fps, latency_ms=self.latest_latency_ms)
+
+                # Frame rate target delay (~25 FPS)
+                target_delay = max(0.01, (1.0 / 25.0) - (time.time() - loop_start))
+                await asyncio.sleep(target_delay)
+
+        finally:
+            # Complete cleanup on worker stop / disconnect
+            if self.source:
+                try:
+                    self.source.release()
+                except Exception as e:
+                    logger.error(f"Error releasing source for {self.camera_id}: {e}")
+            self.latest_jpeg = None
+            self.frame_buffer.clear()
+            self.latest_tracked_objs = []
+            self.latest_face_objs = []
+            self.latest_anpr_objs = []
+            self.current_fps = 0.0
+            self.latest_latency_ms = 0.0
             try:
-                ret, frame = await loop.run_in_executor(None, self.source.read_frame)
+                self.agent.cleanup_live_session()
             except Exception as e:
-                logger.error(f"Exception during read_frame for {self.camera_id}: {e}")
-                ret, frame = False, None
-
-            if not ret or frame is None:
-                consecutive_read_failures += 1
-                self.dropped_frames += 1
-                source_status = getattr(self.source, "status", "ERROR")
-                if consecutive_read_failures == 10 or consecutive_read_failures % 100 == 0:
-                    self._update_db_status(source_status, fps=0.0, latency_ms=0.0)
-                    logger.warning(f"[CAMERA_DISCONNECTED] camera={self.camera_id} status={source_status} consecutive_failures={consecutive_read_failures} total_dropped={self.dropped_frames}")
-                sleep_dur = 1.0 if consecutive_read_failures > 30 else 0.2
-                await asyncio.sleep(sleep_dur)
-                continue
-
-            consecutive_read_failures = 0
-            self.frame_sequence += 1
-            cap_ts = datetime.utcnow().isoformat() + "Z"
-
-            # Apply camera rotation if configured (0°, 90°, 180°, 270°)
-            if self.rotation == 90:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-            elif self.rotation == 180:
-                frame = cv2.rotate(frame, cv2.ROTATE_180)
-            elif self.rotation == 270:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-            # Maintain rolling frame buffer (last 20 frames)
-            self.frame_buffer.append(frame.copy())
-            if len(self.frame_buffer) > 20:
-                self.frame_buffer.pop(0)
-
-            pre_frame = self.frame_buffer[0] if len(self.frame_buffer) > 5 else None
-
-            # 1. Fast JPEG encoding for video stream (~25 FPS)
+                logger.error(f"Error cleaning up live session for {self.camera_id}: {e}")
+            self._update_db_status("STOPPED", fps=0.0, latency_ms=0.0, force=True)
             try:
-                ok_enc, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-                if ok_enc:
-                    self.latest_jpeg = buf.tobytes()
-            except Exception as e:
-                logger.error(f"JPEG encode error on {self.camera_id}: {e}")
-
-            frame_count += 1
-            elapsed = time.time() - start_time
-            self.current_fps = round(frame_count / max(1.0, elapsed), 1)
-
-            if frame_count % 100 == 1:
-                logger.debug(f"[FRAME RECEIVED] camera={self.camera_id} seq={self.frame_sequence} fps={self.current_fps}")
-
-            # 2. Trigger async AI inference at sampled rate (~8-10 AI FPS), skipping intermediate frames if busy
-            if not self.is_inferencing and (time.time() - self.last_ai_time >= 0.10):
-                asyncio.create_task(self._async_ai_step(frame.copy(), loop_start, pre_frame=pre_frame))
-
-            # 3. Telemetry WS broadcast (Throttled to 6 Hz per camera)
-            now_ws = time.time()
-            if now_ws - self.last_ws_time >= 0.16:
-                self.last_ws_time = now_ws
-                dets_payload = [
-                    {
-                        "track_id": t.track_id,
-                        "class_name": t.class_name,
-                        "confidence": t.confidence,
-                        "bbox": t.bbox,
-                        "previous_bbox": getattr(t, "previous_bbox", None),
-                        "center": t.center,
-                        "previous_centroid": getattr(t, "previous_centroid", None),
-                        "movement_delta": getattr(t, "movement_delta", 0.0),
-                        "velocity": getattr(t, "velocity", 0.0),
-                        "direction": getattr(t, "direction", "STATIONARY"),
-                        "movement_state": getattr(t, "movement_state", "STATIONARY"),
-                        "dwell_time_sec": t.dwell_time_sec,
-                        "is_confirmed": getattr(t, "is_confirmed", False),
-                        "is_fallback": False
-                    } for t in self.latest_tracked_objs
-                ]
-
-                ws_payload = {
+                await self.ws_manager.broadcast({
                     "type": "DETECTIONS_UPDATE",
                     "camera_id": self.camera_id,
                     "frame_sequence": self.frame_sequence,
                     "dropped_frames": self.dropped_frames,
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "inference_mode": "REAL AI | INFERENCE RUNNING",
-                    "detections": dets_payload,
-                    "faces": self.latest_face_objs,
-                    "anpr": getattr(self, 'latest_anpr_objs', []),
-                    "fps": self.current_fps,
-                    "latency_ms": self.latest_latency_ms
-                }
-
-                try:
-                    await self.ws_manager.broadcast(ws_payload)
-                except Exception as e:
-                    logger.debug(f"WS broadcast error for {self.camera_id}: {e}")
-
-            # 4. Throttled DB status updates (once every 2.5 seconds)
-            if time.time() - self.last_db_update_time >= 2.5:
-                self._update_db_status("ONLINE", fps=self.current_fps, latency_ms=self.latest_latency_ms)
-
-            # Frame rate target delay (~25 FPS)
-            target_delay = max(0.01, (1.0 / 25.0) - (time.time() - loop_start))
-            await asyncio.sleep(target_delay)
-
-        # Cleanup on worker stop
-        if self.source:
-            try:
-                self.source.release()
-            except Exception as e:
-                logger.error(f"Error releasing source for {self.camera_id}: {e}")
-        self._update_db_status("STOPPED", fps=0.0, latency_ms=0.0, force=True)
-        logger.info(f"StreamWorker for {self.camera_id} stopped cleanly.")
+                    "inference_mode": "IDLE",
+                    "status": "DISCONNECTED",
+                    "detections": [],
+                    "faces": [],
+                    "anpr": [],
+                    "fps": 0.0,
+                    "latency_ms": 0.0
+                })
+            except Exception:
+                pass
+            logger.info(f"StreamWorker for {self.camera_id} stopped and cleaned up cleanly.")
 
     def _update_db_status(self, status: str, fps: float, latency_ms: float, force: bool = False):
         now = time.time()

@@ -73,6 +73,8 @@ def get_face_detections(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
+    query = db.query(FaceDetection)
+
     if camera_id and camera_id != "all":
         cam = db.query(Camera).filter((Camera.id == camera_id) | (Camera.camera_id == camera_id)).first()
         if cam:

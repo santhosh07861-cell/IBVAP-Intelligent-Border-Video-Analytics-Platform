@@ -368,17 +368,19 @@ export const FaceView: React.FC = () => {
     : null;
 
   // Real-time live face telemetry calculations
-  const liveActiveFacesList = activeCameraTelemetry?.faces || [];
-  const liveActiveCount = liveActiveFacesList.length > 0 ? liveActiveFacesList.length : (kpis.active_faces || 0);
-  const liveKnownCount = liveActiveFacesList.length > 0
+  // Active faces / Known / Unknown / Uncertain live counts must be strictly 0 if camera is OFFLINE / STOPPED or FPS is 0
+  const isCameraOnline = (activeCamera?.status === 'ONLINE') && ((activeCameraTelemetry?.fps || 0) > 0);
+  const liveActiveFacesList = isCameraOnline ? (activeCameraTelemetry?.faces || []) : [];
+  const liveActiveCount = isCameraOnline ? liveActiveFacesList.length : 0;
+  const liveKnownCount = isCameraOnline
     ? liveActiveFacesList.filter((f: any) => f.recognition_status === 'KNOWN' || f.recognition_status === 'VERIFIED').length
-    : (kpis.known_faces || 0);
-  const liveUnknownCount = liveActiveFacesList.length > 0
+    : 0;
+  const liveUnknownCount = isCameraOnline
     ? liveActiveFacesList.filter((f: any) => f.recognition_status === 'UNKNOWN').length
-    : (kpis.unknown_faces || 0);
-  const liveUncertainCount = liveActiveFacesList.length > 0
+    : 0;
+  const liveUncertainCount = isCameraOnline
     ? liveActiveFacesList.filter((f: any) => f.recognition_status === 'UNCERTAIN').length
-    : (kpis.uncertain_faces || 0);
+    : 0;
 
   return (
     <div className="p-6 space-y-6 font-mono">
