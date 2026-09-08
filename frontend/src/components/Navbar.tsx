@@ -62,9 +62,9 @@ const NavbarComponent: React.FC = () => {
   return (
     <header className="h-16 bg-[#111622] border-b border-[#252d42] px-2.5 sm:px-4 lg:px-6 grid grid-cols-[auto_1fr_auto] items-center sticky top-0 z-50 select-none shadow-md w-full gap-1.5 sm:gap-2.5 xl:gap-4 box-border overflow-hidden">
       {/* ── LEFT: Brand Identity (Column 1) ─────────────────────────────── */}
-      <div className="justify-self-start flex items-center gap-1.5 sm:gap-2 shrink-0 min-w-0">
-        <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-blue-600/15 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0 shadow-sm">
-          <Shield className="w-4 h-4 animate-pulse" />
+      <div className="justify-self-start flex items-center gap-1.5 sm:gap-2.5 shrink-0 min-w-0">
+        <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#0a0d14] border border-cyan-500/40 p-0.5 flex items-center justify-center shrink-0 shadow-md shadow-cyan-950/40 overflow-hidden">
+          <img src="/logo.jpg" alt="IBVAP Logo" className="w-full h-full object-cover rounded-md" />
         </div>
         <div className="flex flex-col justify-center min-w-0">
           <div className="flex items-center gap-1.5">

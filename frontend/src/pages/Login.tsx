@@ -36,8 +36,8 @@ export const Login: React.FC = () => {
         <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-600 via-amber-500 to-red-600" />
 
         <div className="flex flex-col items-center text-center mb-6">
-          <div className="w-14 h-14 rounded-xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center text-blue-400 mb-3">
-            <Shield className="w-8 h-8 animate-pulse" />
+          <div className="w-16 h-16 rounded-2xl bg-[#0a0d14] border border-cyan-500/40 p-1 flex items-center justify-center mb-3 shadow-xl shadow-cyan-950/60 overflow-hidden ring-1 ring-blue-500/20">
+            <img src="/logo.jpg" alt="IBVAP Logo" className="w-full h-full object-cover rounded-xl" />
           </div>
           <h2 className="text-xl font-bold tracking-wider text-slate-100">IBVAP COMMAND LOGIN</h2>
           <p className="text-xs text-slate-400 font-mono mt-1">SIH 2026 INTELLIGENT SURVEILLANCE PLATFORM</p>
