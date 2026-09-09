@@ -218,7 +218,10 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const wsHost = (typeof window !== 'undefined' && window.location.hostname.endsWith('netlify.app'))
+      ? 'ibvap-intelligent-border-video-analytics-3tr5.onrender.com'
+      : window.location.host;
+    const wsUrl = `${protocol}//${wsHost}/ws`;
 
     let ws: WebSocket;
     let pingInterval: any;
