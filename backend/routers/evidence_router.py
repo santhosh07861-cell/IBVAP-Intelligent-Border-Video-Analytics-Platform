@@ -66,7 +66,11 @@ def list_evidence(
 ):
     query = db.query(Evidence)
     if camera_id and camera_id != "all":
-        query = query.filter(Evidence.camera_id == camera_id)
+        cam = db.query(Camera).filter((Camera.camera_id == camera_id) | (Camera.id == camera_id)).first()
+        if cam:
+            query = query.filter((Evidence.camera_id == cam.id) | (Evidence.camera_id == cam.camera_id))
+        else:
+            query = query.filter(Evidence.camera_id == camera_id)
 
     order_clause = desc(Evidence.created_at) if sort == "newest" else Evidence.created_at
     items = query.order_by(order_clause).all()
@@ -474,15 +478,27 @@ def clear_all_evidence(
 @router.delete("/by-track/{track_id}")
 def delete_evidence_by_track(
     track_id: str,
+    camera_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(RequireRole(["Administrator", "Security Operator"]))
 ):
     """
-    Deletes all evidence records associated with a specific Track ID.
+    Deletes all evidence records associated with a specific Track ID, optionally scoped to a camera.
     """
+    cam_id_targets = set()
+    if camera_id and camera_id != "all":
+        cam = db.query(Camera).filter((Camera.camera_id == camera_id) | (Camera.id == camera_id)).first()
+        if cam:
+            cam_id_targets.add(cam.id)
+            cam_id_targets.add(cam.camera_id)
+        else:
+            cam_id_targets.add(camera_id)
+
     items = db.query(Evidence).all()
     matched = []
     for item in items:
+        if cam_id_targets and item.camera_id not in cam_id_targets:
+            continue
         meta = item.metadata_json or {}
         if str(meta.get("track_id", "")) == str(track_id):
             matched.append(item)

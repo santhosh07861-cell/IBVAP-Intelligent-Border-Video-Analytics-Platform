@@ -22,7 +22,7 @@ from backend.routers import (
     auth_router, camera_router, zone_router, alert_router,
     incident_router, anpr_router, face_router, analytics_router,
     health_router, model_router, audit_router, demo_router,
-    evidence_router
+    evidence_router, movement_router
 )
 from backend.routers import blockchain_router
 from ai_engine.tracking.tracker import MultiObjectTracker
@@ -140,45 +140,65 @@ app.include_router(demo_router.router)
 app.include_router(evidence_router.router)
 app.include_router(evidence_router.detections_router)
 app.include_router(blockchain_router.router)  # Blockchain tamper-evident audit trail
+app.include_router(movement_router.router)    # Watchlist movement tracking
 
-# WebSocket Connection Manager
+# WebSocket Connection Manager with concurrency-safe per-client send queues
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.active_queues: Dict[WebSocket, asyncio.Queue] = {}
+        self.active_tasks: Dict[WebSocket, asyncio.Task] = {}
+
+    async def _send_worker(self, websocket: WebSocket, queue: asyncio.Queue):
+        try:
+            while True:
+                message = await queue.get()
+                if message is None:
+                    break
+                await websocket.send_json(message)
+                queue.task_done()
+        except Exception:
+            pass
+        finally:
+            self.disconnect(websocket)
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"[WEBSOCKET_CONNECTED] total_active={len(self.active_connections)}")
+        q = asyncio.Queue(maxsize=300)
+        task = asyncio.create_task(self._send_worker(websocket, q))
+        self.active_queues[websocket] = q
+        self.active_tasks[websocket] = task
+        logger.info(f"[WEBSOCKET_CONNECTED] total_active={len(self.active_queues)}")
 
     def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-            logger.info(f"[WEBSOCKET_DISCONNECTED] total_active={len(self.active_connections)}")
+        task = self.active_tasks.pop(websocket, None)
+        self.active_queues.pop(websocket, None)
+        if task and not task.done():
+            task.cancel()
+        logger.info(f"[WEBSOCKET_DISCONNECTED] total_active={len(self.active_queues)}")
 
     async def broadcast(self, message: dict):
         """
-        Broadcast to all active WebSocket connections.
-        Dead connections are collected and removed after each cycle
-        to prevent memory leak from stale sockets accumulating.
+        Concurrency-safe broadcast to all active WebSocket connections.
+        Each client has a dedicated queue and worker, eliminating socket race conditions.
         """
-        dead_connections: List[WebSocket] = []
         msg_type = message.get("type", "UNKNOWN")
+        dead = []
 
-        for connection in list(self.active_connections):
+        for ws, q in list(self.active_queues.items()):
             try:
-                await connection.send_json(message)
+                # If queue is full, drop oldest non-critical telemetry to eliminate lag
+                if q.full():
+                    try:
+                        q.get_nowait()
+                        q.task_done()
+                    except (asyncio.QueueEmpty, ValueError):
+                        pass
+                q.put_nowait(message)
             except Exception:
-                # Socket is broken — mark for cleanup
-                dead_connections.append(connection)
+                dead.append(ws)
 
-        # Remove dead connections AFTER iterating (avoids modifying list during loop)
-        for dead in dead_connections:
-            if dead in self.active_connections:
-                self.active_connections.remove(dead)
-
-        if dead_connections:
-            logger.warning(f"[WEBSOCKET_CLEANUP] removed={len(dead_connections)} dead sockets remaining={len(self.active_connections)}")
+        for ws in dead:
+            self.disconnect(ws)
 
         # Structured pipeline broadcast log for key security events
         if msg_type in ("ALERT_NEW", "INCIDENT_NEW", "EVIDENCE_NEW", "ANPR_WATCHLIST_MATCH", "FACE_WATCHLIST_MATCH"):
@@ -188,9 +208,9 @@ class ConnectionManager:
             event_type = message.get("event_type", "")
             severity = message.get("severity", "")
             if msg_type in ("ALERT_NEW", "FACE_WATCHLIST_MATCH", "ANPR_WATCHLIST_MATCH"):
-                logger.info(f"[ALERT_NEW_BROADCAST] type={msg_type} alert_id={alert_id} camera={camera} event_type={event_type} severity={severity} recipients={len(self.active_connections)}")
+                logger.info(f"[ALERT_NEW_BROADCAST] type={msg_type} alert_id={alert_id} camera={camera} event_type={event_type} severity={severity} recipients={len(self.active_queues)}")
             elif msg_type == "INCIDENT_NEW":
-                logger.info(f"[INCIDENT_NEW_BROADCAST] incident_id={incident_id} alert_id={alert_id} camera={camera} recipients={len(self.active_connections)}")
+                logger.info(f"[INCIDENT_NEW_BROADCAST] incident_id={incident_id} alert_id={alert_id} camera={camera} recipients={len(self.active_queues)}")
 
 manager = ConnectionManager()
 
@@ -199,11 +219,10 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Keepalive / listen for client ping
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, Exception):
         manager.disconnect(websocket)
 
 

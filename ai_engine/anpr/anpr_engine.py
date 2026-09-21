@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ─── Indian License Plate Format Patterns ────────────────────────────────────
 # Standard Indian plates: RJ19CB4821, DL01AB9999, MH02CD1234
 # BH (Bharat) series: 22BH1234AB
-_PLATE_STANDARD = re.compile(r'^[A-Z]{2}[0-9]{1,2}[A-Z]{2,3}[0-9]{4}$')
+_PLATE_STANDARD = re.compile(r'^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$')
 _PLATE_BH_SERIES = re.compile(r'^[0-9]{2}BH[0-9]{4}[A-Z]{1,2}$')
 
 # Characters that OCR commonly confuses — used only to report, NOT to auto-substitute
@@ -138,7 +138,8 @@ class ANPRPlateTracker:
     def get_best_result(self, camera_id: str, track_id: int) -> Tuple[str, float, bool]:
         """
         Returns (plate_text, avg_ocr_confidence, is_valid_format).
-        plate_text is 'PLATE UNCERTAIN' if no reading met ANPR_OCR_CONFIDENCE_THRESHOLD.
+        plate_text is 'PLATE UNCERTAIN' if no reading met ANPR_OCR_CONFIDENCE_THRESHOLD,
+        or if multi-frame readings conflict without reaching confirmation consensus.
         """
         key = (camera_id, track_id)
         with self._lock:
@@ -146,7 +147,26 @@ class ANPRPlateTracker:
             if not state or not state["votes"]:
                 return "PLATE UNCERTAIN", 0.0, False
 
-            top_text, _ = state["votes"].most_common(1)[0]
+            # Filter out unreadable / uncertain entries
+            valid_votes = {
+                t: c for t, c in state["votes"].items()
+                if t and t not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE"]
+            }
+            if not valid_votes:
+                return "PLATE UNCERTAIN", 0.0, False
+
+            # Order by vote count descending
+            sorted_candidates = sorted(valid_votes.items(), key=lambda x: x[1], reverse=True)
+            top_text, top_count = sorted_candidates[0]
+
+            # If multiple conflicting plate readings exist:
+            if len(sorted_candidates) > 1:
+                second_text, second_count = sorted_candidates[1]
+                # Tie or top candidate hasn't reached confirmation threshold with conflicting candidates
+                if top_count == second_count or top_count < ANPR_CONFIRMATION_FRAMES:
+                    # Do not randomly guess or pick one; keep as uncertain
+                    return "PLATE UNCERTAIN", 0.0, False
+
             avg_conf = (
                 state["conf_sum"].get(top_text, 0.0) /
                 max(1, state["conf_count"].get(top_text, 1))
@@ -189,8 +209,11 @@ def normalize_plate_text(raw_text: str) -> str:
     """
     if not raw_text:
         return "PLATE UNCERTAIN"
+    stripped = raw_text.strip().upper()
+    if stripped in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE", "UNKNOWN"]:
+        return "PLATE UNCERTAIN"
     # Keep only alphanumeric characters, uppercase
-    cleaned = re.sub(r'[^A-Z0-9]', '', raw_text.upper())
+    cleaned = re.sub(r'[^A-Z0-9]', '', stripped)
     # Minimum 4 chars for any meaningful plate fragment
     if len(cleaned) < 4:
         return "PLATE UNCERTAIN"
@@ -242,23 +265,23 @@ class _EasyOCRLoader:
 
 def preprocess_plate_image(plate_img: np.ndarray) -> np.ndarray:
     """
-    Preprocess a plate crop for best OCR accuracy:
-      1. Ensure minimum height of 60px (resize up if too small)
+    Preprocess a plate crop for optimal neural OCR accuracy:
+      1. Ensure minimum height of 64px (clean character stroke resolution)
       2. Convert to grayscale
-      3. CLAHE contrast enhancement
-      4. Bilateral filter denoising (preserves edges)
-      5. Adaptive thresholding for binarization
-    Returns the preprocessed image.
+      3. CLAHE contrast enhancement (preserves natural gradient while normalizing illumination)
+      4. Bilateral filter (denoise while keeping sharp character edges)
+      5. Gentle unsharp masking (crispens character boundaries without destroying strokes)
+      6. Return 3-channel RGB for EasyOCR (NO destructive binary thresholding)
     """
     if plate_img is None or plate_img.size == 0:
         return plate_img
 
     h, w = plate_img.shape[:2]
 
-    # 1. Resize: ensure at least 60px height (plates are often small in frame)
-    min_h = 60
+    # 1. Resize: ensure at least 64px height
+    min_h = 64
     if h < min_h:
-        scale = min_h / h
+        scale = min_h / max(1, h)
         new_w = max(int(w * scale), 1)
         plate_img = cv2.resize(plate_img, (new_w, min_h), interpolation=cv2.INTER_CUBIC)
         h, w = plate_img.shape[:2]
@@ -269,43 +292,42 @@ def preprocess_plate_image(plate_img: np.ndarray) -> np.ndarray:
     else:
         gray = plate_img.copy()
 
-    # 3. CLAHE contrast enhancement (helps with uneven lighting, shadows)
+    # 3. CLAHE contrast enhancement
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
-    # 4. Bilateral filter (denoise while preserving character edges)
-    denoised = cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
+    # 4. Bilateral filter (denoise while preserving sharp character edges)
+    denoised = cv2.bilateralFilter(enhanced, d=7, sigmaColor=50, sigmaSpace=50)
 
-    # 5. Adaptive threshold (handles varying illumination across the plate)
-    thresh = cv2.adaptiveThreshold(
-        denoised, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2
-    )
+    # 5. Gentle unsharp mask to crispen character boundaries
+    gaussian = cv2.GaussianBlur(denoised, (0, 0), 2.0)
+    sharpened = cv2.addWeighted(denoised, 1.25, gaussian, -0.25, 0)
 
-    # Return as 3-channel for EasyOCR compatibility
-    return cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+    # Return as 3-channel BGR for EasyOCR compatibility
+    return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
 
 # ─── Plate Localization ───────────────────────────────────────────────────────
 
 def find_plate_region(vehicle_crop: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[List[float]]]:
     """
-    Attempts to localize the license plate within a vehicle crop using:
-      1. Canny edge detection on the lower 60% of the crop
-      2. Contour-based rectangular region detection
-      3. Perspective warp correction for angled plates
+    Localizes the license plate region within a vehicle crop using:
+      1. Deep text bounding box detection (CRAFT via EasyOCR) on the vehicle ROI
+      2. Morphological Sobel-X character gradient and rectangular contour analysis
+      3. Zero fake fallbacks: returns (None, None) if no genuine plate is detected.
 
     Returns:
-      (plate_img, plate_bbox_norm) where plate_bbox_norm is [x, y, w, h] normalized
-      to vehicle crop dimensions, or (None, None) if no plate found.
+      (plate_crop, plate_bbox_norm) where plate_bbox_norm is [x, y, w, h] normalized
+      to the vehicle crop dimensions, or (None, None) if no plate is visible.
     """
     if vehicle_crop is None or vehicle_crop.size == 0:
         return None, None
 
     full_h, full_w = vehicle_crop.shape[:2]
+    if full_h < 30 or full_w < 40:
+        return None, None
 
-    # License plates are mounted in the lower ~60% of a vehicle
+    # License plates are predominantly mounted in the lower ~65% of the vehicle
     roi_y_start = int(full_h * 0.35)
     roi = vehicle_crop[roi_y_start:full_h, :]
     roi_h, roi_w = roi.shape[:2]
@@ -313,107 +335,79 @@ def find_plate_region(vehicle_crop: np.ndarray) -> Tuple[Optional[np.ndarray], O
     if roi_h < 20 or roi_w < 40:
         return None, None
 
-    # Edge detection
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged = cv2.Canny(blurred, 30, 150)
+    # ── Strategy 1: Deep Text Detection via EasyOCR CRAFT ─────────────────────
+    try:
+        reader = _EasyOCRLoader.get_reader()
+        if reader is not None:
+            horizontal_list, _ = reader.detect(roi)
+            boxes = horizontal_list[0] if horizontal_list else []
+            for box in boxes:
+                x1, x2, y1, y2 = box
+                bw = int(x2 - x1)
+                bh = int(y2 - y1)
+                if bw < 15 or bh < 8:
+                    continue
+                aspect = bw / max(1, bh)
+                # Plate aspect ratio check (standard plates 2.0-6.5, two-tier 1.2-2.5)
+                if 1.2 <= aspect <= 7.0 and (bw * bh) >= 120:
+                    # Pad bounding box slightly to capture full plate border
+                    pad_x = int(bw * 0.15)
+                    pad_y = int(bh * 0.20)
+                    px1 = max(0, int(x1) - pad_x)
+                    py1 = max(0, int(y1) - pad_y)
+                    px2 = min(roi_w, int(x2) + pad_x)
+                    py2 = min(roi_h, int(y2) + pad_y)
+                    plate_crop = roi[py1:py2, px1:px2]
+                    if plate_crop.size > 0:
+                        norm_x = round(px1 / full_w, 3)
+                        norm_y = round((roi_y_start + py1) / full_h, 3)
+                        norm_w = round((px2 - px1) / full_w, 3)
+                        norm_h = round((py2 - py1) / full_h, 3)
+                        return plate_crop, [norm_x, norm_y, norm_w, norm_h]
+    except Exception as e:
+        logger.debug(f"[ANPR] CRAFT localization error: {e}")
 
-    # Morphological close to connect plate character edges
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
-    closed = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel)
+    # ── Strategy 2: Morphological Edge / Contour Localization ─────────────────
+    try:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # Vertical gradient (Sobel-X) highlights high-density plate characters
+        grad_x = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
+        grad_x = cv2.convertScaleAbs(grad_x)
+        # Morphological close with horizontal rectangle to connect character strokes
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
+        closed = cv2.morphologyEx(grad_x, cv2.MORPH_CLOSE, kernel)
+        _, thresh = cv2.threshold(closed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None, None
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_candidate = None
+        best_area = 0.0
 
-    best_candidate = None
-    best_area = 0.0
-
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area < 300:  # Too small to be a plate
-            continue
-
-        # Approximate to polygon
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-
-        if len(approx) == 4:
-            # 4-corner rectangle: strong plate candidate
-            x, y, w, h = cv2.boundingRect(approx)
-            aspect = w / max(h, 1)
-            # Indian plates: typically 2:1 to 5:1 aspect ratio
-            if 1.5 <= aspect <= 6.0 and area > best_area:
-                best_area = area
-                best_candidate = (approx, x, y, w, h)
-        else:
-            # Non-4-corner contour: use bounding rect fallback
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < 250:
+                continue
             x, y, w, h = cv2.boundingRect(c)
             aspect = w / max(h, 1)
+            # Standard Indian plates: 1.8 to 6.0 aspect ratio
             if 1.8 <= aspect <= 6.0 and area > best_area:
                 best_area = area
-                best_candidate = (None, x, y, w, h)
+                best_candidate = (x, y, w, h)
 
-    if best_candidate is None:
-        # No good plate candidate found → use lower-center region as fallback
-        fallback_y = int(roi_h * 0.3)
-        fallback_h = roi_h - fallback_y
-        fallback_x = int(roi_w * 0.1)
-        fallback_w = int(roi_w * 0.8)
-        plate_crop = roi[fallback_y:roi_h, fallback_x:fallback_x + fallback_w]
-        if plate_crop.size == 0:
-            return None, None
-        # Normalize bbox relative to full vehicle crop
-        norm_x = fallback_x / full_w
-        norm_y = (roi_y_start + fallback_y) / full_h
-        norm_w = fallback_w / full_w
-        norm_h = fallback_h / full_h
-        return plate_crop, [round(norm_x, 3), round(norm_y, 3), round(norm_w, 3), round(norm_h, 3)]
-
-    approx_pts, x, y, w, h = best_candidate
-
-    # Perspective correction for 4-corner candidates
-    if approx_pts is not None and len(approx_pts) == 4:
-        pts = approx_pts.reshape(4, 2).astype(np.float32)
-        # Sort corners: top-left, top-right, bottom-right, bottom-left
-        rect = _order_corners(pts)
-        max_w = int(max(
-            np.linalg.norm(rect[0] - rect[1]),
-            np.linalg.norm(rect[2] - rect[3])
-        ))
-        max_h = int(max(
-            np.linalg.norm(rect[0] - rect[3]),
-            np.linalg.norm(rect[1] - rect[2])
-        ))
-        if max_w < 20 or max_h < 5:
+        if best_candidate is not None:
+            x, y, w, h = best_candidate
             plate_crop = roi[y:y + h, x:x + w]
-        else:
-            dst = np.array([[0, 0], [max_w - 1, 0], [max_w - 1, max_h - 1], [0, max_h - 1]], dtype=np.float32)
-            M = cv2.getPerspectiveTransform(rect, dst)
-            plate_crop = cv2.warpPerspective(roi, M, (max_w, max_h))
-    else:
-        plate_crop = roi[y:y + h, x:x + w]
+            if plate_crop.size > 0:
+                norm_x = round(x / full_w, 3)
+                norm_y = round((roi_y_start + y) / full_h, 3)
+                norm_w = round(w / full_w, 3)
+                norm_h = round(h / full_h, 3)
+                return plate_crop, [norm_x, norm_y, norm_w, norm_h]
+    except Exception as e:
+        logger.debug(f"[ANPR] Morphological localization error: {e}")
 
-    if plate_crop is None or plate_crop.size == 0:
-        return None, None
-
-    norm_x = x / full_w
-    norm_y = (roi_y_start + y) / full_h
-    norm_w = w / full_w
-    norm_h = h / full_h
-    return plate_crop, [round(norm_x, 3), round(norm_y, 3), round(norm_w, 3), round(norm_h, 3)]
-
-
-def _order_corners(pts: np.ndarray) -> np.ndarray:
-    """Order 4 corner points: top-left, top-right, bottom-right, bottom-left."""
-    rect = np.zeros((4, 2), dtype=np.float32)
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]   # Top-left: smallest sum
-    rect[2] = pts[np.argmax(s)]   # Bottom-right: largest sum
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]  # Top-right: smallest diff
-    rect[3] = pts[np.argmax(diff)]  # Bottom-left: largest diff
-    return rect
+    # ── No visible plate found ────────────────────────────────────────────────
+    # Strict rule: Never invent a fallback crop of the entire vehicle/bumper
+    return None, None
 
 
 # ─── OCR Runner ───────────────────────────────────────────────────────────────
@@ -425,11 +419,11 @@ def run_easyocr(plate_img: np.ndarray) -> Tuple[str, float]:
     Returns ('PLATE UNCERTAIN', 0.0) on failure or low confidence.
     """
     reader = _EasyOCRLoader.get_reader()
-    if reader is None:
+    if reader is None or plate_img is None or plate_img.size == 0:
         return "PLATE UNCERTAIN", 0.0
 
     try:
-        # allowlist: only uppercase letters and digits — reject OCR hallucinations
+        # allowlist: uppercase letters and digits — rejects spurious punctuation
         results = reader.readtext(
             plate_img,
             allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
@@ -440,15 +434,14 @@ def run_easyocr(plate_img: np.ndarray) -> Tuple[str, float]:
         if not results:
             return "PLATE UNCERTAIN", 0.0
 
-        # Aggregate all detected text segments (handles multi-line plates)
+        # Aggregate detected text segments across lines
         texts = []
         confidences = []
         for (_, text, conf) in results:
-            if conf >= ANPR_OCR_CONFIDENCE_THRESHOLD:
-                normalized = normalize_plate_text(text)
-                if normalized != "PLATE UNCERTAIN":
-                    texts.append(normalized)
-                    confidences.append(conf)
+            cleaned = normalize_plate_text(text)
+            if cleaned != "PLATE UNCERTAIN" and conf >= ANPR_OCR_CONFIDENCE_THRESHOLD:
+                texts.append(cleaned)
+                confidences.append(float(conf))
 
         if not texts:
             return "PLATE UNCERTAIN", 0.0
@@ -602,7 +595,7 @@ def save_anpr_evidence_snapshot(
         cv2.rectangle(annotated, (px, py), (px2, py2), plate_color, 2)
 
         # Plate number label on plate box
-        if plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE"]:
+        if plate_text and plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE"]:
             p_label = f"{plate_text} | OCR:{int(ocr_confidence * 100)}%"
         else:
             p_label = "PLATE UNREADABLE"
@@ -626,7 +619,10 @@ def save_anpr_evidence_snapshot(
     cv2.putText(annotated, banner_text, (10, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (230, 230, 230), 1, cv2.LINE_AA)
 
     # Plate number prominent display in banner
-    plate_display = f"PLATE: {plate_text}"
+    if plate_text and plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE"]:
+        plate_display = f"PLATE: {plate_text} (OCR: {int(ocr_confidence * 100)}%)"
+    else:
+        plate_display = "PLATE: UNREADABLE"
     cv2.putText(annotated, plate_display, (10, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.58,
                 (0, 100, 255) if is_watchlist else (0, 255, 160), 1, cv2.LINE_AA)
 
@@ -635,7 +631,7 @@ def save_anpr_evidence_snapshot(
     os.makedirs(save_dir, exist_ok=True)
 
     clean_cam = camera_id.replace(" ", "_").replace("/", "_")
-    clean_plate = re.sub(r'[^A-Z0-9]', '_', plate_text.upper())
+    clean_plate = re.sub(r'[^A-Z0-9]', '_', (plate_text or 'UNREADABLE').upper())
     filename = (
         f"{clean_cam}_{vehicle_type.upper()}_{clean_plate}_"
         f"{now_dt.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}.jpg"

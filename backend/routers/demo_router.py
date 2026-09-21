@@ -63,19 +63,6 @@ def trigger_demo_intrusion(
 
     incident = correlator.process_event(db, event_data, evidence_path=ev_path)
 
-    # Also add an ANPR event for testing ANPR dashboard
-    anpr = ANPRResult(
-        id=str(uuid.uuid4()),
-        camera_id=cam_id,
-        plate_text="RJ19CB4821",
-        plate_confidence=0.95,
-        ocr_confidence=0.92,
-        vehicle_type="car",
-        timestamp=datetime.utcnow()
-    )
-    db.add(anpr)
-    db.commit()
-
     return {
         "status": "success",
         "message": "SIH Demo Intrusion workflow triggered successfully!",

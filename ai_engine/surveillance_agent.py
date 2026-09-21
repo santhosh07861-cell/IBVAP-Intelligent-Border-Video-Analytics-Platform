@@ -16,7 +16,11 @@ from ai_engine.anpr.anpr_engine import ANPREngine, save_anpr_evidence_snapshot, 
 from event_engine.risk.scorer import OperationalRiskScorer
 from storage.evidence_manager import EvidenceManager
 from database.connection import SessionLocal
-from database.schema import Camera, CameraZone, ZoneRule, Event, Alert, Incident, Evidence, FaceDetection, FaceWatchlist, ANPRResult, ANPRWatchlist, Detection, AuditBlock
+from database.schema import (
+    Camera, CameraZone, ZoneRule, Event, Alert, Incident, Evidence,
+    FaceDetection, FaceWatchlist, ANPRResult, ANPRWatchlist, Detection, AuditBlock,
+    WatchlistMovementChain, WatchlistMovementEvent
+)
 from backend.blockchain_audit import create_audit_block
 
 from backend.config import (
@@ -68,23 +72,27 @@ class AISurveillanceAgent:
       6. Deduplication & cooldown enforcement
       7. Non-blocking WebSocket telemetry & Alert dispatch
     """
-    _io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="evidence_io")
-
     def __init__(self, camera_id: str, websocket_manager: Any):
         self.camera_id = camera_id
         self.ws_manager = websocket_manager
         self.detector = RealAIDetector(conf_threshold=DETECTION_CONFIDENCE_THRESHOLD)
-        self.tracker = MultiObjectTracker()
+        self.tracker = MultiObjectTracker(camera_id=self.camera_id)
         self.face_engine = RealFaceEngine()
-        self.face_tracker = FaceTracker()
+        self.face_tracker = FaceTracker(camera_id=self.camera_id)
         self.anpr_engine = ANPREngine()
         self.scorer = OperationalRiskScorer()
         self.evidence_mgr = EvidenceManager()
+        self._agent_executor: Optional[ThreadPoolExecutor] = None
+        self._cached_cam_meta: Optional[Dict[str, Any]] = None
+        self._cam_meta_time: float = 0.0
+        self._cached_watchlist: List[Any] = []
+        self._watchlist_cache_time: float = 0.0
         self.last_alert_times: Dict[str, float] = {}
         self.last_detection_snapshot_times: Dict[Tuple[str, int, str], float] = {}
         self.last_face_process_time = 0.0
         self.last_anpr_process_times: Dict[Tuple[str, int], float] = {}
         self.last_anpr_db_times: Dict[Tuple[str, str], float] = {}
+        self._anpr_in_flight: set = set()
         self.vehicle_record_state: Dict[Tuple[str, int], Dict[str, Any]] = {}
         self.last_face_db_record_times: Dict[Tuple[str, int, str, str], float] = {}
         self.active_faces: List[Dict[str, Any]] = []
@@ -105,6 +113,308 @@ class AISurveillanceAgent:
         # Suppression caches for operator-deleted items: key -> expiration timestamp
         self.suppressed_alert_keys: Dict[str, float] = {}
         self.suppressed_face_keys: Dict[Any, float] = {}
+        # Database query caching to prevent SQLite overhead during live streaming
+        self._cached_cam_meta: Optional[Dict[str, Any]] = None
+        self._cam_meta_time: float = 0.0
+        self._cached_watchlist: Optional[List[Any]] = None
+        self._watchlist_cache_time: float = 0.0
+        self._cached_zones: Optional[List[Tuple[Any, List[Any]]]] = None
+        self._zones_cache_time: float = 0.0
+        self._cached_anpr_watchlist: Optional[List[Any]] = None
+        self._anpr_watchlist_cache_time: float = 0.0
+
+    @property
+    def agent_executor(self) -> ThreadPoolExecutor:
+        if self._agent_executor is None or getattr(self._agent_executor, "_shutdown", False):
+            self._agent_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"ai_{self.camera_id}")
+        return self._agent_executor
+
+    @agent_executor.setter
+    def agent_executor(self, value: Optional[ThreadPoolExecutor]):
+        self._agent_executor = value
+
+    def _get_camera_meta(self, db) -> Dict[str, Any]:
+        now = time.time()
+        if self._cached_cam_meta and (now - self._cam_meta_time < 10.0):
+            return self._cached_cam_meta
+        cam = db.query(Camera).filter((Camera.camera_id == self.camera_id) | (Camera.id == self.camera_id)).first()
+        self._cached_cam_meta = {
+            "id": cam.id if cam else self.camera_id,
+            "camera_id": cam.camera_id if cam else self.camera_id,
+            "name": cam.name if (cam and cam.name) else f"Camera {self.camera_id}",
+            "location": (cam.location.strip() if (cam and cam.location and cam.location.strip()) else "LOCATION NOT CONFIGURED"),
+            "latitude": float(cam.latitude) if (cam and cam.latitude is not None) else None,
+            "longitude": float(cam.longitude) if (cam and cam.longitude is not None) else None
+        }
+        self._cam_meta_time = now
+        return self._cached_cam_meta
+
+    def _get_watchlist_records(self, db) -> List[Any]:
+        now = time.time()
+        if self._cached_watchlist and (now - self._watchlist_cache_time < 5.0):
+            return self._cached_watchlist
+        records = db.query(FaceWatchlist).filter(FaceWatchlist.is_active == True).all()
+        cached = []
+        for r in records:
+            _ = (r.id, r.name, r.person_id, r.category, r.embedding, r.is_active)
+            try:
+                db.expunge(r)
+            except Exception:
+                pass
+            cached.append(r)
+        self._cached_watchlist = cached
+        self._watchlist_cache_time = now
+        return self._cached_watchlist
+
+    def _get_zones_and_rules(self, db) -> List[Tuple[Any, List[Any]]]:
+        """
+        Retrieves active CameraZones and their ZoneRules for this camera with a 30s in-memory cache.
+        Eliminates repeated SQLite queries on every processed frame.
+        """
+        now = time.time()
+        if self._cached_zones and (now - self._zones_cache_time < 30.0):
+            return self._cached_zones
+
+        cam = db.query(Camera).filter((Camera.camera_id == self.camera_id) | (Camera.id == self.camera_id)).first()
+        if not cam:
+            return []
+
+        zones = db.query(CameraZone).filter(
+            (CameraZone.camera_id == cam.id) | (CameraZone.camera_id == cam.camera_id) | (CameraZone.camera_id == self.camera_id),
+            CameraZone.is_active == True
+        ).all()
+
+        cached_zones_with_rules = []
+        for zone in zones:
+            rules = db.query(ZoneRule).filter(ZoneRule.zone_id == zone.id, ZoneRule.enabled == True).all()
+            for r in rules:
+                try: db.expunge(r)
+                except Exception: pass
+            try: db.expunge(zone)
+            except Exception: pass
+            cached_zones_with_rules.append((zone, rules))
+
+        self._cached_zones = cached_zones_with_rules
+        self._zones_cache_time = now
+        return self._cached_zones
+
+    def _get_anpr_watchlist_records(self, db) -> List[Any]:
+        """
+        Retrieves active ANPRWatchlist records with a 10s in-memory cache.
+        Eliminates repeated SQLite queries on every vehicle detection frame.
+        """
+        now = time.time()
+        if self._cached_anpr_watchlist and (now - self._anpr_watchlist_cache_time < 10.0):
+            return self._cached_anpr_watchlist
+        records = db.query(ANPRWatchlist).filter(ANPRWatchlist.is_active == True).all()
+        cached = []
+        for r in records:
+            try: db.expunge(r)
+            except Exception: pass
+            cached.append(r)
+        self._cached_anpr_watchlist = cached
+        self._anpr_watchlist_cache_time = now
+        return self._cached_anpr_watchlist
+
+    async def _record_watchlist_movement(
+        self,
+        db: Any,
+        track: FaceTrack,
+        cam_meta: Dict[str, Any],
+        now_dt: datetime,
+        evidence_id: Optional[str] = None,
+        evidence_url: Optional[str] = None,
+        crop_url: Optional[str] = None
+    ) -> Optional[WatchlistMovementEvent]:
+        """
+        Records a confirmed Watchlist Person detection into their chronological movement chain.
+        - Exactly one WatchlistMovementChain per watchlist_person_id (face_watchlist.id).
+        - Aggregates multi-frame detections at a single camera into one observation session
+          (first_seen_at to last_seen_at) rather than creating duplicate sequence nodes.
+        - Creates a new WatchlistMovementEvent (incrementing sequence_number) only when transitioning
+          to another camera or returning after a prolonged absence (> 120 seconds).
+        - Broadcasts WATCHLIST_MOVEMENT_UPDATE via WebSocket with authoritative runtime data.
+        """
+        if not track.identity_id or track.recognition_status != "KNOWN":
+            return None
+
+        now_sec = time.time()
+        person_db_id = track.identity_id
+        person_name = track.identity_name or "WATCHLIST SUBJECT"
+        person_id_badge = getattr(track, "person_id", None) or f"ID-{person_db_id[:8]}"
+        person_cat = (getattr(track, "category", "") or "WATCHLIST").upper()
+
+        cam_id = cam_meta["id"]
+        cam_num = cam_meta["camera_id"]
+        cam_name = cam_meta["name"]
+        cam_loc = cam_meta.get("location") or "LOCATION NOT CONFIGURED"
+        cam_lat = cam_meta.get("latitude")
+        cam_lon = cam_meta.get("longitude")
+
+        conf = float(track.recognition_confidence)
+        similarity = float(getattr(track, "raw_similarity", track.recognition_confidence))
+
+        # 1. Fetch or create WatchlistMovementChain for this person
+        chain = db.query(WatchlistMovementChain).filter(
+            WatchlistMovementChain.watchlist_person_id == person_db_id
+        ).first()
+
+        if not chain:
+            chain = WatchlistMovementChain(
+                id=str(uuid.uuid4()),
+                watchlist_person_id=person_db_id,
+                person_name=person_name,
+                person_id=person_id_badge,
+                category=person_cat,
+                current_camera_id=cam_id,
+                current_camera_number=cam_num,
+                current_camera_name=cam_name,
+                current_location=cam_loc,
+                current_latitude=cam_lat,
+                current_longitude=cam_lon,
+                status="ACTIVE",
+                first_detected_at=now_dt,
+                last_detected_at=now_dt,
+                total_detections=0,
+                created_at=now_dt,
+                updated_at=now_dt
+            )
+            db.add(chain)
+            db.flush()
+
+        # 2. Get latest event in this chain
+        latest_event = db.query(WatchlistMovementEvent).filter(
+            WatchlistMovementEvent.chain_id == chain.id
+        ).order_by(WatchlistMovementEvent.sequence_number.desc()).first()
+
+        event_to_broadcast = None
+        is_new_node = False
+
+        same_camera = (
+            latest_event is not None and
+            (latest_event.camera_id == cam_id or latest_event.camera_number == cam_num)
+        )
+
+        if same_camera:
+            # Consolidate all continuous observations from the same camera into one visit session
+            latest_event.last_seen_at = now_dt
+            latest_event.confidence = max(latest_event.confidence, conf)
+            latest_event.face_similarity = max(latest_event.face_similarity, similarity)
+            if evidence_id:
+                latest_event.evidence_id = evidence_id
+            if evidence_url:
+                latest_event.evidence_url = evidence_url
+            if crop_url:
+                latest_event.crop_url = crop_url
+
+            chain.last_detected_at = now_dt
+            chain.status = "ACTIVE"
+            chain.total_detections += 1
+            chain.updated_at = now_dt
+            event_to_broadcast = latest_event
+        else:
+            # Create NEW sequence node only when transitioning to a different real camera
+            next_seq = (latest_event.sequence_number + 1) if latest_event else 1
+            new_event = WatchlistMovementEvent(
+                id=str(uuid.uuid4()),
+                chain_id=chain.id,
+                sequence_number=next_seq,
+                watchlist_person_id=person_db_id,
+                watchlist_person_name=person_name,
+                camera_id=cam_id,
+                camera_number=cam_num,
+                camera_name=cam_name,
+                location=cam_loc,
+                latitude=cam_lat,
+                longitude=cam_lon,
+                first_seen_at=now_dt,
+                last_seen_at=now_dt,
+                timestamp=now_dt,
+                confidence=conf,
+                face_similarity=similarity,
+                track_id=track.track_id,
+                evidence_id=evidence_id,
+                evidence_url=evidence_url,
+                crop_url=crop_url,
+                created_at=now_dt
+            )
+            db.add(new_event)
+
+            chain.current_camera_id = cam_id
+            chain.current_camera_number = cam_num
+            chain.current_camera_name = cam_name
+            chain.current_location = cam_loc
+            chain.current_latitude = cam_lat
+            chain.current_longitude = cam_lon
+            chain.last_detected_at = now_dt
+            chain.status = "ACTIVE"
+            chain.total_detections += 1
+            chain.updated_at = now_dt
+
+            event_to_broadcast = new_event
+            is_new_node = True
+
+        db.commit()
+
+        # 3. Broadcast real-time update via WebSocket
+        # Immediate broadcast if new node; throttled every 2s if same-camera session update
+        last_bcast = getattr(self, "_last_movement_broadcast_times", {}).get(person_db_id, 0.0)
+        if is_new_node or (now_sec - last_bcast >= 2.0):
+            if not hasattr(self, "_last_movement_broadcast_times"):
+                self._last_movement_broadcast_times = {}
+            self._last_movement_broadcast_times[person_db_id] = now_sec
+
+            payload = {
+                "type": "WATCHLIST_MOVEMENT_UPDATE",
+                "chain_id": chain.id,
+                "watchlist_person_id": chain.watchlist_person_id,
+                "person_name": chain.person_name,
+                "person_id": chain.person_id,
+                "category": chain.category,
+                "status": chain.status,
+                "current_camera_id": chain.current_camera_id,
+                "current_camera_number": chain.current_camera_number,
+                "current_camera_name": chain.current_camera_name,
+                "current_location": chain.current_location or "LOCATION NOT CONFIGURED",
+                "current_latitude": chain.current_latitude,
+                "current_longitude": chain.current_longitude,
+                "last_detected_at": chain.last_detected_at.isoformat() + "Z",
+                "total_detections": chain.total_detections,
+                "event": {
+                    "id": event_to_broadcast.id,
+                    "sequence_number": event_to_broadcast.sequence_number,
+                    "watchlist_person_id": event_to_broadcast.watchlist_person_id,
+                    "watchlist_person_name": event_to_broadcast.watchlist_person_name,
+                    "camera_id": event_to_broadcast.camera_id,
+                    "camera_number": event_to_broadcast.camera_number,
+                    "camera_name": event_to_broadcast.camera_name,
+                    "location": event_to_broadcast.location or "LOCATION NOT CONFIGURED",
+                    "latitude": event_to_broadcast.latitude,
+                    "longitude": event_to_broadcast.longitude,
+                    "first_seen_at": event_to_broadcast.first_seen_at.isoformat() + "Z",
+                    "last_seen_at": event_to_broadcast.last_seen_at.isoformat() + "Z",
+                    "timestamp": event_to_broadcast.timestamp.isoformat() + "Z",
+                    "date": event_to_broadcast.timestamp.strftime("%Y-%m-%d"),
+                    "time": event_to_broadcast.timestamp.strftime("%H:%M:%S"),
+                    "confidence": event_to_broadcast.confidence,
+                    "face_similarity": event_to_broadcast.face_similarity,
+                    "track_id": event_to_broadcast.track_id,
+                    "evidence_id": event_to_broadcast.evidence_id,
+                    "evidence_url": event_to_broadcast.evidence_url,
+                    "crop_url": event_to_broadcast.crop_url
+                }
+            }
+            if self.ws_manager:
+                try:
+                    await self.ws_manager.broadcast(payload)
+                except Exception as ws_err:
+                    logger.warning(f"[WATCHLIST_MOVEMENT] WebSocket broadcast error: {ws_err}")
+            logger.info(
+                f"📍 [WATCHLIST_MOVEMENT] person={chain.person_name} cam={cam_num} "
+                f"seq={event_to_broadcast.sequence_number} is_new_node={is_new_node}"
+            )
+
+        return event_to_broadcast
 
     def cleanup_live_session(self):
         """
@@ -113,6 +423,10 @@ class AISurveillanceAgent:
         """
         self.active_faces = []
         self.active_anpr = []
+        self.tracker.tracks.clear()
+        self.tracker.disappeared.clear()
+        self.tracker.class_votes.clear()
+        self.tracker.recent_lost_tracks.clear()
         self.face_tracker.tracks.clear()
         self.face_alert_state.clear()
         self.track_zone_states.clear()
@@ -122,6 +436,7 @@ class AISurveillanceAgent:
         self.last_detection_snapshot_times.clear()
         self.last_anpr_process_times.clear()
         self.last_anpr_db_times.clear()
+        self._anpr_in_flight.clear()
         self.vehicle_record_state.clear()
         if hasattr(self.anpr_engine, 'tracker') and hasattr(self.anpr_engine.tracker, '_tracks'):
             with self.anpr_engine.tracker._lock:
@@ -129,12 +444,28 @@ class AISurveillanceAgent:
         self.last_face_process_time = 0.0
         logger.info(f"[CAMERA_CLEANUP] Live surveillance, vehicle ANPR & face session reset for camera={self.camera_id}")
 
+    def shutdown(self):
+        """Safely terminates background execution and releases resources."""
+        self.cleanup_live_session()
+        try:
+            if self._agent_executor is not None:
+                self._agent_executor.shutdown(wait=False)
+                self._agent_executor = None
+        except Exception:
+            self._agent_executor = None
+
     async def process_frame(self, frame: np.ndarray, loop_start_time: float, pre_frame: Optional[np.ndarray] = None) -> Tuple[List[TrackedObject], float, float, List[Dict[str, Any]], List[Dict[str, Any]]]:
         if frame is None or frame.size == 0:
             return [], 0.0, 0.0, [], []
 
-        # 1. Run Real AI Model Inference (YOLOv8)
-        raw_detections = self.detector.detect(frame, self.camera_id)
+        # 1. Run Real AI Model Inference (YOLOv8) asynchronously on dedicated camera executor
+        loop = asyncio.get_running_loop()
+        raw_detections = await loop.run_in_executor(
+            self.agent_executor,
+            self.detector.detect,
+            frame,
+            self.camera_id
+        )
 
         # 2. Filter Detections
         filtered_detections = [d for d in raw_detections if d.confidence >= DETECTION_CONFIDENCE_THRESHOLD]
@@ -194,7 +525,7 @@ class AISurveillanceAgent:
         # 1. YuNet Face Detection directly on the live video frame (independent of YOLO object boxes)
         loop = asyncio.get_event_loop()
         detected_faces: List[DetectedFace] = await loop.run_in_executor(
-            self._io_executor,
+            self.agent_executor,
             lambda: self.face_engine.detect_faces(frame)
         )
 
@@ -208,13 +539,13 @@ class AISurveillanceAgent:
 
         db = SessionLocal()
         try:
-            cam = db.query(Camera).filter((Camera.camera_id == self.camera_id) | (Camera.id == self.camera_id)).first()
-            cam_id = cam.id if cam else self.camera_id
-            cam_num = cam.camera_id if cam else self.camera_id
-            cam_name = cam.name if cam else "Campus Security Camera"
-            cam_loc = cam.location or "Campus Main Gate" if cam else "Campus Main Gate"
+            cam_meta = self._get_camera_meta(db)
+            cam_id = cam_meta["id"]
+            cam_num = cam_meta["camera_id"]
+            cam_name = cam_meta["name"]
+            cam_loc = cam_meta["location"]
 
-            watchlist_records = db.query(FaceWatchlist).filter(FaceWatchlist.is_active == True).all()
+            watchlist_records = self._get_watchlist_records(db)
 
             faces_payload = []
             for track in confirmed_tracks:
@@ -232,7 +563,7 @@ class AISurveillanceAgent:
                 is_verified_student_staff = is_known and (p_cat in VERIFIED_CATEGORIES)
                 is_threat_watchlist = is_known and (p_cat in THREAT_CATEGORIES)
                 is_unknown_person = not is_known
-                is_uncertain = (track.recognition_status == "UNCERTAIN") or (not getattr(track, "is_high_quality", True) and track.quality_score < 0.35)
+                is_uncertain = not is_known and ((track.recognition_status == "UNCERTAIN") or (not getattr(track, "is_high_quality", True) and track.quality_score < 0.35))
 
                 face_data = {
                     "track_id": track.track_id,
@@ -272,20 +603,34 @@ class AISurveillanceAgent:
                 # 3. Track returns after absence (new track_id)
                 # 4. Configured cooldown interval (FACE_RECORD_COOLDOWN_SEC) has elapsed
                 do_fd_record = is_first_save or status_changed or cooldown_passed
+                if not do_fd_record and is_known:
+                    last_mv_sec = getattr(self, "_last_movement_update_times", {}).get((self.camera_id, track.identity_id), 0.0)
+                    if (now_sec - last_mv_sec) >= 2.0:
+                        if not hasattr(self, "_last_movement_update_times"):
+                            self._last_movement_update_times = {}
+                        self._last_movement_update_times[(self.camera_id, track.identity_id)] = now_sec
+                        await self._record_watchlist_movement(
+                            db=db,
+                            track=track,
+                            cam_meta=cam_meta,
+                            now_dt=datetime.utcnow(),
+                            evidence_id=getattr(track, "_last_evidence_id", None),
+                            evidence_url=getattr(track, "_last_snap_url", None),
+                            crop_url=getattr(track, "_last_crop_url", None)
+                        )
+
                 if do_fd_record:
                     track._has_db_record = True
                     track._last_db_status = track.recognition_status
                     self.last_face_db_record_times[track_key] = now_sec
 
-
-
                     # Offload crop and snapshot saving to background thread
                     crop_saved = await loop.run_in_executor(
-                        self._io_executor,
+                        self.agent_executor,
                         lambda: self.face_engine.save_face_crop(frame.copy(), track.bbox_norm, f"{cam_num}_F{track.track_id}")
                     )
                     snap_saved = await loop.run_in_executor(
-                        self._io_executor,
+                        self.agent_executor,
                         lambda: self.face_engine.save_annotated_face_snapshot(
                             frame=frame.copy(),
                             camera_id=cam_num,
@@ -300,6 +645,11 @@ class AISurveillanceAgent:
                     snap_url = snap_saved[1] if snap_saved else None
                     snap_path = snap_saved[0] if snap_saved else ""
                     snap_size = snap_saved[2] if snap_saved else 0
+
+                    track._last_snap_url = snap_url
+                    track._last_crop_url = crop_url
+                    track._last_snap_path = snap_path
+                    track._last_snap_size = snap_size
 
                     now_dt = datetime.utcnow()
                     ts_str = f"{now_dt.isoformat()}Z"
@@ -352,8 +702,38 @@ class AISurveillanceAgent:
                             timestamp=now_dt,
                             track_id=track.track_id
                         )
-                        db.add(ev_student)
-                        db.commit()
+                        ev_evidence = None
+                        if snap_saved:
+                            ev_evidence = Evidence(
+                                id=str(uuid.uuid4()),
+                                camera_id=cam_id,
+                                evidence_type="snapshot",
+                                file_path=snap_path,
+                                file_url=snap_url,
+                                file_size_bytes=snap_size,
+                                metadata_json={
+                                    "person_name": track.identity_name,
+                                    "person_id": p_badge,
+                                    "category": p_cat,
+                                    "timestamp": ts_str,
+                                    "camera_number": cam_num,
+                                    "face_detection_id": face_rec.id,
+                                },
+                                created_at=now_dt
+                            )
+                            db.add(ev_evidence)
+                            db.commit()
+                            track._last_evidence_id = ev_evidence.id
+
+                        await self._record_watchlist_movement(
+                            db=db,
+                            track=track,
+                            cam_meta=cam_meta,
+                            now_dt=now_dt,
+                            evidence_id=ev_evidence.id if ev_evidence else None,
+                            evidence_url=snap_url,
+                            crop_url=crop_url
+                        )
 
                     # 3. Case B: Threat / Watchlist Match -> ONE CRITICAL Alert per track
                     elif is_threat_watchlist:
@@ -458,6 +838,17 @@ class AISurveillanceAgent:
                             logger.info(
                                 f"[ALERT_CREATED] alert_id={al_threat.id} event=FACE_WATCHLIST_MATCH "
                                 f"camera={cam_num} face_track_id={track.track_id} identity={track.identity_name}"
+                            )
+
+                            # Record Watchlist Movement with actual generated evidence
+                            await self._record_watchlist_movement(
+                                db=db,
+                                track=track,
+                                cam_meta=cam_meta,
+                                now_dt=now_dt,
+                                evidence_id=ev_evidence.id if snap_saved else None,
+                                evidence_url=snap_url,
+                                crop_url=crop_url
                             )
 
                             # ONE canonical ALERT_NEW broadcast (not 4)
@@ -566,12 +957,78 @@ class AISurveillanceAgent:
                                 f"event=FACE_WATCHLIST_MATCH existing_alert_id={existing['alert_id']} "
                                 f"reason=track_still_active"
                             )
-                            db.commit()
+                            ev_evidence = None
+                            if snap_saved:
+                                ev_evidence = Evidence(
+                                    id=str(uuid.uuid4()),
+                                    camera_id=cam_id,
+                                    evidence_type="snapshot",
+                                    file_path=snap_path,
+                                    file_url=snap_url,
+                                    file_size_bytes=snap_size,
+                                    metadata_json={
+                                        "person_name": track.identity_name,
+                                        "person_id": p_badge,
+                                        "category": p_cat,
+                                        "timestamp": ts_str,
+                                        "camera_number": cam_num,
+                                        "face_detection_id": face_rec.id,
+                                    },
+                                    created_at=now_dt
+                                )
+                                db.add(ev_evidence)
+                                db.commit()
+                                track._last_evidence_id = ev_evidence.id
 
-                    # 4. Case C: Uncertain / Low Quality Face -> Log only (NO Alarm)
+                            await self._record_watchlist_movement(
+                                db=db,
+                                track=track,
+                                cam_meta=cam_meta,
+                                now_dt=now_dt,
+                                evidence_id=ev_evidence.id if ev_evidence else getattr(track, "_last_evidence_id", None),
+                                evidence_url=snap_url,
+                                crop_url=crop_url
+                            )
+
+                    # 4. Case C: Uncertain / Low Quality Face -> Log only (NO Alarm, NO Watchlist Movement)
                     elif is_uncertain:
                         logger.info(f"ℹ️ [UNCERTAIN FACE QUALITY] Track #{track.track_id} on {cam_num} (Quality Score: {track.quality_score:.2f}) — Logged only, NO ALARM")
                         db.commit()
+
+                    # 5. Case D: Other Known Watchlist Category -> Update Movement Chain
+                    elif is_known:
+                        ev_evidence = None
+                        if snap_saved:
+                            ev_evidence = Evidence(
+                                id=str(uuid.uuid4()),
+                                camera_id=cam_id,
+                                evidence_type="snapshot",
+                                file_path=snap_path,
+                                file_url=snap_url,
+                                file_size_bytes=snap_size,
+                                metadata_json={
+                                    "person_name": track.identity_name,
+                                    "person_id": p_badge,
+                                    "category": p_cat,
+                                    "timestamp": ts_str,
+                                    "camera_number": cam_num,
+                                    "face_detection_id": face_rec.id,
+                                },
+                                created_at=now_dt
+                            )
+                            db.add(ev_evidence)
+                            db.commit()
+                            track._last_evidence_id = ev_evidence.id
+
+                        await self._record_watchlist_movement(
+                            db=db,
+                            track=track,
+                            cam_meta=cam_meta,
+                            now_dt=now_dt,
+                            evidence_id=ev_evidence.id if ev_evidence else getattr(track, "_last_evidence_id", None),
+                            evidence_url=snap_url,
+                            crop_url=crop_url
+                        )
 
                     # 5. Case D: Unknown Person -> ONE Security Alert per track
                     else:
@@ -808,102 +1265,142 @@ class AISurveillanceAgent:
 
         for obj in vehicle_objs:
             track_key = (self.camera_id, obj.track_id)
-            # Throttle inference per track (~0.5s) to avoid redundant OCR computation on every video frame
-            if now_sec - self.last_anpr_process_times.get(track_key, 0) < 0.50:
+            if track_key in self._anpr_in_flight:
+                continue
+
+            # Throttle inference per track: 3.0s if plate already confirmed with high confidence, 0.5s otherwise
+            # Avoids redundant heavy EasyOCR CPU inference on continuously visible identified vehicles
+            is_already_confirmed = (track_key in self.vehicle_record_state and self.vehicle_record_state[track_key].get("ocr_confidence", 0.0) >= 0.70)
+            ocr_throttle = 3.0 if is_already_confirmed else 0.50
+            if now_sec - self.last_anpr_process_times.get(track_key, 0) < ocr_throttle:
                 continue
             self.last_anpr_process_times[track_key] = now_sec
 
-            # Accurate vehicle classification from AI model with confidence check
-            raw_class = (obj.class_name or "").lower().strip()
-            if obj.confidence < 0.40:
-                vehicle_type = "UNKNOWN"
-            else:
-                vehicle_type = VEHICLE_TYPE_MAP.get(raw_class, raw_class.upper() if raw_class in VEHICLE_CLASSES else "UNKNOWN")
-
-            vx = max(0, int(obj.bbox[0] * fw))
-            vy = max(0, int(obj.bbox[1] * fh))
-            vw = max(1, int(obj.bbox[2] * fw))
-            vh = max(1, int(obj.bbox[3] * fh))
-            vehicle_crop = frame[vy:min(fh, vy + vh), vx:min(fw, vx + vw)].copy()
-
-            if vehicle_crop.size == 0:
-                continue
-
-            anpr_result = None
-            try:
-                anpr_result = await loop.run_in_executor(
-                    self._io_executor,
-                    lambda crop=vehicle_crop, tid=obj.track_id: self.anpr_engine.process_vehicle_crop(
-                        crop, self.camera_id, tid
-                    )
-                )
-            except Exception as e:
-                logger.error(f"[ANPR] process_vehicle_crop error on {self.camera_id}: {e}")
-
-            # Get best multi-frame stabilized OCR result from tracker
-            plate_text, avg_conf, is_valid = self.anpr_engine.tracker.get_best_result(
-                self.camera_id, obj.track_id
-            )
-
-            # Determine plate string, confidence and status
-            if plate_text and plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE"] and avg_conf >= 0.40:
-                final_plate = plate_text
-                final_ocr_conf = avg_conf
-                status = "CONFIRMED"
-            else:
-                final_plate = "PLATE UNREADABLE"
-                final_ocr_conf = 0.0
-                status = "UNCERTAIN"
-
-            plate_bbox_in_vehicle = anpr_result.get("plate_bbox_norm") if anpr_result else None
-
-            # Update live in-memory active ANPR state for UI HUD
-            self.active_anpr = [a for a in self.active_anpr if a.get("track_id") != obj.track_id]
-            self.active_anpr.append({
-                "track_id": obj.track_id,
-                "vehicle_type": vehicle_type,
-                "bbox": obj.bbox,
-                "plate_text": final_plate,
-                "ocr_confidence": final_ocr_conf,
-                "status": status,
-            })
-
-            # Check if we have already recorded this track in the database
+            # Check if track record already exists in database (even if not yet in in-memory state)
             existing_record = self.vehicle_record_state.get(track_key)
+            if not existing_record:
+                check_db = SessionLocal()
+                try:
+                    cam_meta = self._get_camera_meta(check_db)
+                    cam_db_id = cam_meta["id"]
+                    db_rec = check_db.query(ANPRResult).filter(
+                        (ANPRResult.camera_id == cam_db_id) | (ANPRResult.camera_id == self.camera_id),
+                        ANPRResult.vehicle_track_id == obj.track_id
+                    ).order_by(desc(ANPRResult.timestamp)).first()
+                    if db_rec:
+                        existing_record = {
+                            "record_id": db_rec.id,
+                            "plate_number": db_rec.plate_number,
+                            "ocr_confidence": db_rec.ocr_confidence or 0.0,
+                            "vehicle_type": db_rec.vehicle_type,
+                            "status": db_rec.status,
+                            "snapshot_url": db_rec.snapshot_url,
+                            "is_watchlist": db_rec.is_watchlist_match,
+                            "last_updated": now_sec,
+                        }
+                        self.vehicle_record_state[track_key] = existing_record
+                except Exception as e:
+                    logger.debug(f"[ANPR] DB check error: {e}")
+                finally:
+                    check_db.close()
 
-            # If existing record exists and plate has NOT improved, skip redundant DB updates
-            if existing_record:
-                prev_plate = existing_record.get("plate_number")
-                prev_conf = existing_record.get("ocr_confidence", 0.0)
-                # Check if we have a meaningful improvement:
-                # 1. Previous was unreadable and now we have a recognized plate
-                # 2. Previous had lower OCR confidence and now confidence is higher by >= 0.05
-                is_improved = False
-                if prev_plate in ["PLATE UNREADABLE", "UNKNOWN / UNREADABLE"] and final_plate not in ["PLATE UNREADABLE", "UNKNOWN / UNREADABLE"]:
-                    is_improved = True
-                elif final_plate not in ["PLATE UNREADABLE", "UNKNOWN / UNREADABLE"] and final_ocr_conf > (prev_conf + 0.05):
-                    is_improved = True
+            # Enforce deduplication cooldown for new track observations before heavy OCR
+            if not existing_record:
+                cooldown_key = (self.camera_id, str(obj.track_id))
+                if now_sec - self.last_anpr_db_times.get(cooldown_key, 0) < ANPR_DUPLICATE_COOLDOWN_SEC:
+                    continue
+                # Atomically reserve cooldown now to prevent concurrent frames from racing
+                self.last_anpr_db_times[cooldown_key] = now_sec
 
-                if not is_improved:
+            self._anpr_in_flight.add(track_key)
+            db = None
+            try:
+                # Accurate vehicle classification from AI model with confidence check
+                raw_class = (obj.class_name or "").lower().strip()
+                if obj.confidence < 0.40:
+                    vehicle_type = "UNKNOWN"
+                else:
+                    vehicle_type = VEHICLE_TYPE_MAP.get(raw_class, raw_class.upper() if raw_class in VEHICLE_CLASSES else "UNKNOWN")
+
+                vx = max(0, int(obj.bbox[0] * fw))
+                vy = max(0, int(obj.bbox[1] * fh))
+                vw = max(1, int(obj.bbox[2] * fw))
+                vh = max(1, int(obj.bbox[3] * fh))
+                vehicle_crop = frame[vy:min(fh, vy + vh), vx:min(fw, vx + vw)].copy()
+
+                if vehicle_crop.size == 0:
                     continue
 
-            # DB persistence logic (Insert new OR Update existing)
-            db = SessionLocal()
-            try:
-                cam = db.query(Camera).filter(
-                    (Camera.camera_id == self.camera_id) | (Camera.id == self.camera_id)
-                ).first()
-                cam_id = cam.id if cam else self.camera_id
-                cam_num = cam.camera_id if cam else self.camera_id
-                cam_name = cam.name if cam else "Campus Surveillance Camera"
-                cam_loc = cam.location or "Gate 1 Main Entry" if cam else "Gate 1 Main Entry"
+                anpr_result = None
+                try:
+                    anpr_result = await loop.run_in_executor(
+                        self.agent_executor,
+                        lambda crop=vehicle_crop, tid=obj.track_id: self.anpr_engine.process_vehicle_crop(
+                            crop, self.camera_id, tid
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"[ANPR] process_vehicle_crop error on {self.camera_id}: {e}")
+
+                # Get best multi-frame stabilized OCR result from tracker
+                plate_text, avg_conf, is_valid = self.anpr_engine.tracker.get_best_result(
+                    self.camera_id, obj.track_id
+                )
+
+                # Determine plate string, confidence and status
+                if plate_text and plate_text not in ["PLATE UNCERTAIN", "UNKNOWN / UNREADABLE", "PLATE UNREADABLE"] and avg_conf >= 0.40:
+                    final_plate = plate_text
+                    final_ocr_conf = avg_conf
+                    status = "CONFIRMED"
+                else:
+                    final_plate = None
+                    final_ocr_conf = 0.0
+                    status = "UNCERTAIN"
+
+                plate_bbox_in_vehicle = anpr_result.get("plate_bbox_norm") if anpr_result else None
+
+                # Update live in-memory active ANPR state for UI HUD
+                self.active_anpr = [a for a in self.active_anpr if a.get("track_id") != obj.track_id]
+                self.active_anpr.append({
+                    "track_id": obj.track_id,
+                    "vehicle_type": vehicle_type,
+                    "bbox": obj.bbox,
+                    "plate_text": final_plate or "PLATE UNREADABLE",
+                    "ocr_confidence": final_ocr_conf,
+                    "status": status,
+                })
+
+                # If existing record exists and plate has NOT improved, skip redundant DB updates
+                if existing_record:
+                    prev_plate = existing_record.get("plate_number")
+                    prev_conf = existing_record.get("ocr_confidence", 0.0)
+                    # Check if we have a meaningful improvement:
+                    # 1. Previous was unreadable (None) and now we have a recognized plate
+                    # 2. Previous had lower OCR confidence and now confidence is higher by >= 0.05
+                    is_improved = False
+                    if prev_plate is None and final_plate is not None:
+                        is_improved = True
+                    elif final_plate is not None and final_ocr_conf > (prev_conf + 0.05):
+                        is_improved = True
+
+                    if not is_improved:
+                        existing_record["last_updated"] = now_sec
+                        continue
+
+                # DB persistence logic (Insert new OR Update existing)
+                db = SessionLocal()
+                cam_meta = self._get_camera_meta(db)
+                cam_id = cam_meta["id"]
+                cam_num = cam_meta["camera_id"]
+                cam_name = cam_meta["name"]
+                cam_loc = cam_meta.get("location") or "LOCATION NOT CONFIGURED"
 
                 # Check Watchlist match if plate is valid
                 is_watchlist = False
                 watchlist_entry = None
-                if final_plate not in ["PLATE UNREADABLE", "UNKNOWN / UNREADABLE", "PLATE UNCERTAIN"]:
+                if final_plate:
                     clean_search_plate = final_plate.upper().replace(" ", "").replace("-", "")
-                    active_watchlists = db.query(ANPRWatchlist).filter(ANPRWatchlist.is_active == True).all()
+                    active_watchlists = self._get_anpr_watchlist_records(db)
                     for wl in active_watchlists:
                         wl_clean = (wl.plate_number or "").upper().replace(" ", "").replace("-", "")
                         if wl_clean and (wl_clean == clean_search_plate or wl_clean in clean_search_plate):
@@ -915,7 +1412,7 @@ class AISurveillanceAgent:
 
                 # Generate tactical evidence snapshot
                 saved = await loop.run_in_executor(
-                    self._io_executor,
+                    self.agent_executor,
                     lambda: save_anpr_evidence_snapshot(
                         frame=frame.copy(),
                         vehicle_bbox=obj.bbox,
@@ -1182,10 +1679,14 @@ class AISurveillanceAgent:
 
             except Exception as ex:
                 logger.error(f"[ANPR] Pipeline error on {self.camera_id}: {ex}", exc_info=True)
-                try: db.rollback()
-                except Exception: pass
+                if db is not None:
+                    try: db.rollback()
+                    except Exception: pass
             finally:
-                db.close()
+                if db is not None:
+                    try: db.close()
+                    except Exception: pass
+                self._anpr_in_flight.discard(track_key)
 
     async def _create_and_broadcast_detection_evidence(self, obj: TrackedObject, frame: np.ndarray):
         if frame is None or frame.size == 0:
@@ -1226,7 +1727,7 @@ class AISurveillanceAgent:
 
             loop = asyncio.get_event_loop()
             saved = await loop.run_in_executor(
-                self._io_executor,
+                self.agent_executor,
                 lambda: self.evidence_mgr.save_annotated_snapshot(
                     frame=frame.copy(),
                     camera_id=cam_num,
@@ -1350,18 +1851,15 @@ class AISurveillanceAgent:
             if not cam:
                 return
 
-            zones = db.query(CameraZone).filter(
-                (CameraZone.camera_id == cam.id) | (CameraZone.camera_id == cam.camera_id) | (CameraZone.camera_id == self.camera_id),
-                CameraZone.is_active == True
-            ).all()
-            if not zones:
+            zone_rule_pairs = self._get_zones_and_rules(db)
+            if not zone_rule_pairs:
                 return
 
             now_sec = time.time()
             hour_now = datetime.utcnow().hour
             is_night = (hour_now >= 18 or hour_now < 6)
 
-            for zone in zones:
+            for zone, cached_rules in zone_rule_pairs:
                 coords = zone.coordinates
                 if not coords or len(coords) < 3:
                     continue
@@ -1379,20 +1877,21 @@ class AISurveillanceAgent:
                         (nx, ny + nh),                   # Bottom-left
                         (nx + nw, ny + nh)               # Bottom-right
                     ]
-                    inside = any(point_in_polygon(pt, polygon) for pt in test_points) or any(
-                        nx <= vx <= nx + nw and ny <= vy <= ny + nh for vx, vy in polygon
-                    )
+                    inside = False
+                    for pt in test_points:
+                        if point_in_polygon(pt, polygon):
+                            inside = True
+                            break
+
                     logger.debug(f"[ZONE CHECK] camera={self.camera_id} track_id={obj.track_id} zone='{zone.name}' inside={inside}")
 
                     state_key = (self.camera_id, obj.track_id, zone.id)
-                    if state_key not in self.track_zone_states:
-                        self.track_zone_states[state_key] = {
-                            "is_inside": False,
-                            "entry_time": 0.0,
-                            "intrusion_event_generated": False,
-                            "loitering_event_generated": False
-                        }
-                    state = self.track_zone_states[state_key]
+                    state = self.track_zone_states.setdefault(state_key, {
+                        "is_inside": False,
+                        "entry_time": 0.0,
+                        "intrusion_event_generated": False,
+                        "loitering_event_generated": False
+                    })
 
                     # OUTSIDE -> INSIDE
                     if inside:
@@ -1423,7 +1922,7 @@ class AISurveillanceAgent:
                     if not state["is_inside"]:
                         continue
 
-                    rules = db.query(ZoneRule).filter(ZoneRule.zone_id == zone.id, ZoneRule.enabled == True).all()
+                    rules = cached_rules
                     if not rules:
                         class FallbackRule:
                             object_type = "all"
@@ -1669,7 +2168,7 @@ class AISurveillanceAgent:
         if frame is not None:
             loop = asyncio.get_event_loop()
             saved_seq = await loop.run_in_executor(
-                self._io_executor,
+                self.agent_executor,
                 lambda: self.evidence_mgr.save_evidence_sequence(
                     event_frame=frame.copy(),
                     camera_id=cam.camera_id,

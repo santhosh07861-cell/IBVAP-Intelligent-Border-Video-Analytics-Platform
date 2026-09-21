@@ -110,7 +110,15 @@ def get_anpr_records(
     query = db.query(ANPRResult)
 
     if plate_query:
-        query = query.filter(ANPRResult.plate_number.ilike(f"%{plate_query.upper().strip()}%"))
+        pq = plate_query.upper().strip()
+        if pq == "UNREADABLE":
+            query = query.filter(
+                (ANPRResult.plate_number == None) |
+                (ANPRResult.plate_number == "PLATE UNREADABLE") |
+                (ANPRResult.status == "UNCERTAIN")
+            )
+        else:
+            query = query.filter(ANPRResult.plate_number.ilike(f"%{pq}%"))
 
     if vehicle_type and vehicle_type.lower() != "all":
         query = query.filter(ANPRResult.vehicle_type.ilike(f"%{vehicle_type.upper()}%"))
@@ -121,7 +129,9 @@ def get_anpr_records(
             (Camera.camera_id == camera_id) | (Camera.id == camera_id)
         ).first()
         if cam:
-            query = query.filter(ANPRResult.camera_id == cam.id)
+            query = query.filter((ANPRResult.camera_id == cam.id) | (ANPRResult.camera_id == cam.camera_id))
+        else:
+            query = query.filter(ANPRResult.camera_id == camera_id)
 
     if status:
         query = query.filter(ANPRResult.status == status.upper())
@@ -167,8 +177,8 @@ def get_anpr_stats(
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     total_today = db.query(ANPRResult).filter(ANPRResult.timestamp >= today_start).count()
     confirmed_today = db.query(ANPRResult).filter(
-        ANPRResult.timestamp >= today_start,
-        ANPRResult.status == "CONFIRMED"
+        ANPRResult.status == "CONFIRMED",
+        ANPRResult.plate_number != None
     ).count()
     watchlist_matches = db.query(ANPRResult).filter(
         ANPRResult.timestamp >= today_start,
@@ -318,15 +328,76 @@ class BulkDeleteANPRRequest(BaseModel):
     result_ids: List[str]
 
 
+@router.delete("/results/all")
+@router.delete("/all")
+def delete_all_anpr_results(
+    db: Session = Depends(get_db),
+    current_user=Depends(RequireRole(["Administrator", "Security Operator", "Analyst", "Admin", "Operator"]))
+):
+    """
+    Permanently deletes ALL ANPR detection records from the database and cleans up
+    their associated evidence snapshots and crops.
+    Does NOT delete registered cameras, watchlist persons, face database, or other modules.
+    """
+    recs = db.query(ANPRResult).all()
+    count = len(recs)
+    if count == 0:
+        return {
+            "success": True,
+            "deleted_count": 0,
+            "message": "No ANPR detection records to delete."
+        }
+
+    # Clean up associated snapshot evidence files from disk
+    for rec in recs:
+        if rec.snapshot_url:
+            fname = os.path.basename(rec.snapshot_url)
+            local_path = os.path.join(ANPR_SNAPSHOT_DIR, fname)
+            if os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                except Exception as e:
+                    logger.error(f"[ANPR CLEANUP] Error deleting snapshot {local_path}: {e}")
+
+        if rec.crop_url:
+            cname = os.path.basename(rec.crop_url)
+            crop_path = os.path.join("storage/evidence/anpr/crops", cname)
+            if os.path.exists(crop_path):
+                try:
+                    os.remove(crop_path)
+                except Exception as e:
+                    logger.error(f"[ANPR CLEANUP] Error deleting crop {crop_path}: {e}")
+
+        db.delete(rec)
+
+    audit = AuditLog(
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else "operator",
+        action="DELETE_ALL_ANPR_RESULTS",
+        resource="anpr_results",
+        details={"deleted_count": count}
+    )
+    db.add(audit)
+    db.commit()
+    logger.info(f"[ANPR] Deleted all {count} ANPR detection records by {current_user.username}")
+
+    return {
+        "success": True,
+        "deleted_count": count,
+        "message": f"Successfully deleted all {count} ANPR detection records."
+    }
+
+
 @router.delete("/results/{result_id}")
 @router.delete("/{result_id}")
 def delete_anpr_result(
     result_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(RequireRole(["Administrator", "Security Operator"]))
+    current_user=Depends(RequireRole(["Administrator", "Security Operator", "Analyst", "Admin", "Operator"]))
 ):
     """
-    Deletes a historical ANPRResult record and its associated snapshot file.
+    Deletes a historical ANPRResult record and its associated snapshot/crop evidence
+    only if that evidence belongs exclusively to that record.
     Does NOT modify or delete ANPRWatchlist entries.
     """
     rec = db.query(ANPRResult).filter(ANPRResult.id == result_id).first()
@@ -336,16 +407,42 @@ def delete_anpr_result(
     plate = rec.plate_number
     cam_id = rec.camera_id
     vtype = rec.vehicle_type
+    snap_url = rec.snapshot_url
+    crop_url = rec.crop_url
 
-    if rec.snapshot_url:
-        fname = os.path.basename(rec.snapshot_url)
-        local_path = os.path.join("storage/evidence/anpr/snapshots", fname)
-        if os.path.exists(local_path):
-            try:
-                os.remove(local_path)
-                logger.info(f"[ANPR CLEANUP] Deleted {local_path}")
-            except Exception as e:
-                logger.error(f"[ANPR CLEANUP] Error deleting {local_path}: {e}")
+    # Check exclusive snapshot evidence cleanup
+    if snap_url:
+        other_snap_refs = db.query(ANPRResult).filter(
+            ANPRResult.id != rec.id,
+            ANPRResult.snapshot_url == snap_url
+        ).count()
+        if other_snap_refs == 0:
+            fname = os.path.basename(snap_url)
+            local_path = os.path.join(ANPR_SNAPSHOT_DIR, fname)
+            if os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                    logger.info(f"[ANPR CLEANUP] Deleted exclusive snapshot: {local_path}")
+                except Exception as e:
+                    logger.error(f"[ANPR CLEANUP] Error deleting {local_path}: {e}")
+        else:
+            logger.info(f"[ANPR CLEANUP] Retained shared snapshot: {snap_url} (referenced by {other_snap_refs} other records)")
+
+    # Check exclusive crop evidence cleanup
+    if crop_url:
+        other_crop_refs = db.query(ANPRResult).filter(
+            ANPRResult.id != rec.id,
+            ANPRResult.crop_url == crop_url
+        ).count()
+        if other_crop_refs == 0:
+            cname = os.path.basename(crop_url)
+            crop_path = os.path.join("storage/evidence/anpr/crops", cname)
+            if os.path.exists(crop_path):
+                try:
+                    os.remove(crop_path)
+                    logger.info(f"[ANPR CLEANUP] Deleted exclusive crop: {crop_path}")
+                except Exception as e:
+                    logger.error(f"[ANPR CLEANUP] Error deleting {crop_path}: {e}")
 
     audit = AuditLog(
         user_id=current_user.id if current_user else None,
@@ -365,14 +462,15 @@ def delete_anpr_result(
     return {"success": True, "message": "ANPR detection record deleted successfully.", "deleted_id": result_id}
 
 
-@router.post("/results/bulk-delete", dependencies=[Depends(RequireRole(["Administrator", "Security Operator"]))])
+@router.post("/results/bulk-delete", dependencies=[Depends(RequireRole(["Administrator", "Security Operator", "Analyst", "Admin", "Operator"]))])
 def bulk_delete_anpr_results(
     payload: BulkDeleteANPRRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
     """
-    Permanently bulk-deletes multiple ANPR detection records from the database.
+    Permanently bulk-deletes multiple ANPR detection records from the database
+    with exclusive evidence cleanup.
     """
     if not payload.result_ids:
         raise HTTPException(status_code=400, detail="No result IDs provided for deletion")
@@ -388,13 +486,31 @@ def bulk_delete_anpr_results(
     for item in items:
         deleted_ids.append(item.id)
         if item.snapshot_url:
-            fname = os.path.basename(item.snapshot_url)
-            local_path = os.path.join("storage/evidence/anpr/snapshots", fname)
-            if os.path.exists(local_path):
-                try:
-                    os.remove(local_path)
-                except Exception:
-                    pass
+            other_snap_refs = db.query(ANPRResult).filter(
+                ~ANPRResult.id.in_(payload.result_ids),
+                ANPRResult.snapshot_url == item.snapshot_url
+            ).count()
+            if other_snap_refs == 0:
+                fname = os.path.basename(item.snapshot_url)
+                local_path = os.path.join(ANPR_SNAPSHOT_DIR, fname)
+                if os.path.exists(local_path):
+                    try:
+                        os.remove(local_path)
+                    except Exception:
+                        pass
+        if item.crop_url:
+            other_crop_refs = db.query(ANPRResult).filter(
+                ~ANPRResult.id.in_(payload.result_ids),
+                ANPRResult.crop_url == item.crop_url
+            ).count()
+            if other_crop_refs == 0:
+                cname = os.path.basename(item.crop_url)
+                crop_path = os.path.join("storage/evidence/anpr/crops", cname)
+                if os.path.exists(crop_path):
+                    try:
+                        os.remove(crop_path)
+                    except Exception:
+                        pass
         db.delete(item)
 
     audit = AuditLog(

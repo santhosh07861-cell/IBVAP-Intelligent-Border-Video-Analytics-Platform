@@ -599,6 +599,7 @@ export const FaceView: React.FC = () => {
               <LiveVideoCanvas
                 cameraId={activeCamera?.camera_id}
                 cameraName={activeCamera?.name}
+                status={activeCameraTelemetry?.status || activeCamera?.status}
                 detections={activeCameraTelemetry?.detections}
                 faces={activeCameraTelemetry?.faces}
                 fps={activeCameraTelemetry?.fps}

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
+import { browserCameraStreamManager } from '../utils/browserCameraStreamManager';
 
 export interface CameraModel {
   id: string;
@@ -10,8 +11,9 @@ export interface CameraModel {
   latitude?: number;
   longitude?: number;
   protocol: string;
+  stream_url?: string;
   role: 'primary' | 'secondary';
-  status: 'ONLINE' | 'OFFLINE' | 'CONNECTING' | 'DEGRADED' | 'ERROR' | 'STOPPED';
+  status: 'ONLINE' | 'OFFLINE' | 'CONNECTING' | 'DEGRADED' | 'ERROR' | 'STOPPED' | 'UNREACHABLE' | 'RECONNECTING' | 'READY' | 'PROCESSING' | 'PLAYING' | 'COMPLETED' | 'FILE ERROR';
   fps: number;
   resolution?: string;
   analytics_enabled?: boolean;
@@ -77,6 +79,23 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
   }, [refreshCameras]);
 
+  // Ensure active browser webcams have their independent browser frame push stream running
+  useEffect(() => {
+    cameras.forEach(cam => {
+      const isBrowserCam = cam.protocol === 'WEBCAM' || cam.protocol === 'BROWSER';
+      const isActiveStatus = cam.status !== 'STOPPED' && cam.status !== 'OFFLINE' && cam.status !== 'UNREACHABLE' && cam.status !== 'COMPLETED' && cam.status !== 'FILE ERROR';
+      if (isBrowserCam && isActiveStatus) {
+        if (!browserCameraStreamManager.isStreaming(cam.camera_id)) {
+          browserCameraStreamManager.startCameraStream(cam.camera_id, cam.stream_url || '').catch(() => {});
+        }
+      } else if (isBrowserCam && !isActiveStatus) {
+        if (browserCameraStreamManager.isStreaming(cam.camera_id)) {
+          browserCameraStreamManager.stopCameraStream(cam.camera_id);
+        }
+      }
+    });
+  }, [cameras]);
+
   const primaryCamera = cameras.find(c => c.role === 'primary') || (cameras.length > 0 ? cameras[0] : null);
   const secondaryCameras = cameras.filter(c => c.id !== primaryCamera?.id && c.camera_id !== primaryCamera?.camera_id);
 
@@ -117,6 +136,14 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const startCameraStream = async (cameraId: string): Promise<boolean> => {
     try {
+      const cam = cameras.find(c => c.camera_id === cameraId || c.id === cameraId);
+      if (cam && (cam.protocol === 'WEBCAM' || cam.protocol === 'BROWSER')) {
+        try {
+          await browserCameraStreamManager.startCameraStream(cam.camera_id, cam.stream_url || '');
+        } catch (streamErr) {
+          console.warn('Browser webcam start warning:', streamErr);
+        }
+      }
       setCameras(prev => prev.map(c => (c.camera_id === cameraId || c.id === cameraId) ? { ...c, status: 'CONNECTING' } : c));
       const res = await fetch(`/api/cameras/${cameraId}/start`, {
         method: 'POST',
@@ -133,6 +160,7 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const stopCameraStream = async (cameraId: string): Promise<boolean> => {
     try {
+      browserCameraStreamManager.stopCameraStream(cameraId);
       setCameras(prev => prev.map(c => (c.camera_id === cameraId || c.id === cameraId) ? { ...c, status: 'STOPPED', fps: 0 } : c));
       const res = await fetch(`/api/cameras/${cameraId}/stop`, {
         method: 'POST',

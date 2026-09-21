@@ -87,14 +87,37 @@ class TrackedObject(pydantic.BaseModel):
     movement_state: str = "STATIONARY"  # MOVING, SLOW_MOVEMENT, STATIONARY, CROUCHING
 
 
+def compute_camera_track_base(camera_id: Optional[str]) -> int:
+    """Computes an isolated, non-overlapping track ID base per camera."""
+    if not camera_id:
+        return 101
+    digits = ''.join(c for c in camera_id if c.isdigit())
+    if digits:
+        try:
+            cam_num = int(digits)
+            return (cam_num % 1000) * 1000 + 101
+        except ValueError:
+            pass
+    h = (abs(hash(str(camera_id))) % 80) + 1
+    return h * 1000 + 101
+
+
 class MultiObjectTracker:
     def __init__(
         self,
         max_disappeared: int = TRACK_MAX_DISAPPEARED,
         max_distance: float = 0.30,
-        confirmation_frames: int = TRACK_CONFIRMATION_FRAMES
+        confirmation_frames: int = TRACK_CONFIRMATION_FRAMES,
+        camera_id: Optional[str] = None,
+        base_track_id: Optional[int] = None
     ):
-        self.next_track_id = 101
+        self.camera_id = camera_id
+        if base_track_id is not None:
+            self.next_track_id = int(base_track_id)
+        elif camera_id:
+            self.next_track_id = compute_camera_track_base(camera_id)
+        else:
+            self.next_track_id = 101
         self.tracks: Dict[int, TrackedObject] = {}
         self.disappeared: Dict[int, int] = {}
         self.class_votes: Dict[int, Counter] = {}  # track_id -> Counter of class names

@@ -22,11 +22,18 @@ class NoteCreate(BaseModel):
 def list_incidents(
     status: Optional[str] = None,
     severity: Optional[str] = None,
+    camera_id: Optional[str] = None,
     limit: int = 50,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     query = db.query(Incident)
+    if camera_id and camera_id != "all":
+        cam = db.query(Camera).filter((Camera.id == camera_id) | (Camera.camera_id == camera_id)).first()
+        if cam:
+            query = query.filter((Incident.camera_id == cam.id) | (Incident.camera_id == cam.camera_id))
+        else:
+            query = query.filter(Incident.camera_id == camera_id)
     if status:
         query = query.filter(Incident.status == status)
     if severity:

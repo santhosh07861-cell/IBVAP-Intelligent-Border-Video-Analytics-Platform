@@ -23,6 +23,7 @@ import { AuditView } from './pages/AuditView';
 import { EvidenceGallery } from './pages/EvidenceGallery';
 import { TacticalGISMap } from './pages/TacticalGISMap';
 import { BlockchainAudit } from './pages/BlockchainAudit';
+import { WatchlistMovementView } from './pages/WatchlistMovementView';
 
 const ProtectedLayout: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -49,6 +50,7 @@ const ProtectedLayout: React.FC = () => {
             <Route path="/detections" element={<EvidenceGallery />} />
             <Route path="/anpr" element={<ANPRView />} />
             <Route path="/faces" element={<FaceView />} />
+            <Route path="/watchlist-movement" element={<WatchlistMovementView />} />
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/camera-health" element={<Navigate to="/system-health" replace />} />
             <Route path="/system-health" element={<HealthView />} />

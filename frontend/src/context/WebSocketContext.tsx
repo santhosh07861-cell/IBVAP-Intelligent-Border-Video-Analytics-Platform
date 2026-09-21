@@ -4,6 +4,7 @@ import { playDangerAlarmSound } from '../utils/alertSound';
 export interface DetectionMessage {
   type: string;
   camera_id?: string;
+  status?: string;
   timestamp?: string;
   inference_mode?: string;
   detections?: Array<{
@@ -122,6 +123,7 @@ interface WebSocketContextType {
   latestAlerts: any[];             // ← Canonical shared alert store (all pages consume this)
   telemetryMap: Record<string, DetectionMessage>;
   getCameraTelemetry: (cameraId?: string) => DetectionMessage | null;
+  subscribeCameraTelemetry: (cameraId: string, callback: (msg: DetectionMessage) => void) => () => void;
   isConnected: boolean;
   removeAlert: (alertId: string) => void;
   removeAlerts: (alertIds: string[]) => void;
@@ -140,6 +142,35 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [latestAlerts, setLatestAlerts] = useState<any[]>([]);
   const [telemetryMap, setTelemetryMap] = useState<Record<string, DetectionMessage>>({});
   const [isConnected, setIsConnected] = useState<boolean>(false);
+
+  // Per-camera subscriber listener registry for zero-overhead isolated camera card updates
+  const telemetryListeners = useRef<Map<string, Set<(msg: DetectionMessage) => void>>>(new Map());
+  const telemetryRef = useRef<Record<string, DetectionMessage>>({});
+  const pendingTelemetryUpdates = useRef<Record<string, DetectionMessage>>({});
+  const telemetryThrottleTimer = useRef<any>(null);
+
+  const subscribeCameraTelemetry = useCallback((cameraId: string, callback: (msg: DetectionMessage) => void) => {
+    if (!cameraId) return () => {};
+    let set = telemetryListeners.current.get(cameraId);
+    if (!set) {
+      set = new Set();
+      telemetryListeners.current.set(cameraId, set);
+    }
+    set.add(callback);
+    const cached = telemetryRef.current[cameraId];
+    if (cached) {
+      callback(cached);
+    }
+    return () => {
+      const s = telemetryListeners.current.get(cameraId);
+      if (s) {
+        s.delete(callback);
+        if (s.size === 0) {
+          telemetryListeners.current.delete(cameraId);
+        }
+      }
+    };
+  }, []);
 
   // Deduplication set — tracks alert IDs already in the store to prevent duplicates
   const seenAlertIds = useRef<Set<string>>(new Set());
@@ -336,10 +367,39 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
           if (data.type === 'DETECTIONS_UPDATE' && data.camera_id) {
             const cid = data.camera_id;
-            setTelemetryMap((prev) => ({
-              ...prev,
-              [cid]: data
-            }));
+            const uuid = (data as any).camera_uuid;
+            telemetryRef.current[cid] = data;
+            if (uuid) telemetryRef.current[uuid] = data;
+
+            // 1. Instantly dispatch to isolated listeners registered for this specific camera
+            const cListeners = telemetryListeners.current.get(cid);
+            if (cListeners) {
+              cListeners.forEach(cb => {
+                try { cb(data); } catch (err) {}
+              });
+            }
+            if (uuid && uuid !== cid) {
+              const uListeners = telemetryListeners.current.get(uuid);
+              if (uListeners) {
+                uListeners.forEach(cb => {
+                  try { cb(data); } catch (err) {}
+                });
+              }
+            }
+
+            // 2. Throttle updating the global telemetryMap state to 250ms (4 Hz)
+            // This isolates camera cards and eliminates full application tree re-renders
+            pendingTelemetryUpdates.current[cid] = data;
+            if (uuid && uuid !== cid) pendingTelemetryUpdates.current[uuid] = data;
+
+            if (!telemetryThrottleTimer.current) {
+              telemetryThrottleTimer.current = setTimeout(() => {
+                telemetryThrottleTimer.current = null;
+                const batch = { ...pendingTelemetryUpdates.current };
+                pendingTelemetryUpdates.current = {};
+                setTelemetryMap((prev) => ({ ...prev, ...batch }));
+              }, 250);
+            }
           }
         } catch (e) {
           // Skip non-JSON (pong, etc.)
@@ -349,6 +409,10 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       ws.onclose = () => {
         setIsConnected(false);
         clearInterval(pingInterval);
+        if (telemetryThrottleTimer.current) {
+          clearTimeout(telemetryThrottleTimer.current);
+          telemetryThrottleTimer.current = null;
+        }
         setTimeout(connect, 3000);
       };
 
@@ -362,12 +426,16 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return () => {
       if (ws) ws.close();
       if (pingInterval) clearInterval(pingInterval);
+      if (telemetryThrottleTimer.current) {
+        clearTimeout(telemetryThrottleTimer.current);
+        telemetryThrottleTimer.current = null;
+      }
     };
   }, [fetchAndMergeAlerts, removeAlert, removeAlerts, clearAlerts]);
 
   const getCameraTelemetry = (cameraId?: string): DetectionMessage | null => {
     if (!cameraId) return null;
-    return telemetryMap[cameraId] || null;
+    return telemetryRef.current[cameraId] || telemetryMap[cameraId] || null;
   };
 
   return (
@@ -380,6 +448,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         latestAlerts,
         telemetryMap,
         getCameraTelemetry,
+        subscribeCameraTelemetry,
         isConnected,
         removeAlert,
         removeAlerts,
@@ -395,4 +464,29 @@ export const useWebSocket = () => {
   const context = useContext(WebSocketContext);
   if (!context) throw new Error('useWebSocket must be used within WebSocketProvider');
   return context;
+};
+
+/**
+ * Isolated hook for subscribing to a specific camera's real-time telemetry.
+ * Prevents re-rendering parent components or other cameras when this camera updates.
+ */
+export const useCameraTelemetry = (cameraId?: string): DetectionMessage | null => {
+  const context = useContext(WebSocketContext);
+  const [telemetry, setTelemetry] = useState<DetectionMessage | null>(() => {
+    return context && cameraId ? context.getCameraTelemetry(cameraId) : null;
+  });
+
+  useEffect(() => {
+    if (!context || !cameraId) {
+      setTelemetry(null);
+      return;
+    }
+    setTelemetry(context.getCameraTelemetry(cameraId));
+    const unsubscribe = context.subscribeCameraTelemetry(cameraId, (msg) => {
+      setTelemetry(msg);
+    });
+    return unsubscribe;
+  }, [context, cameraId]);
+
+  return telemetry;
 };

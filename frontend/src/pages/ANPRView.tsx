@@ -89,7 +89,7 @@ function EvidenceModal({
           <div className="anpr-modal-title-row">
             <span className="anpr-modal-icon">{vehicleIcon(record.vehicle_type)}</span>
             <div>
-              <div className="anpr-modal-plate">{record.plate_number}</div>
+              <div className="anpr-modal-plate">{record.plate_number || 'PLATE UNREADABLE'}</div>
               <div className="anpr-modal-sub">{record.vehicle_type} — {record.status}</div>
             </div>
             {record.is_watchlist_match && (
@@ -99,12 +99,13 @@ function EvidenceModal({
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             {onDelete && (
               <button
+                id={`anpr-modal-delete-btn-${record.id}`}
                 className="anpr-action-btn anpr-action-delete"
                 onClick={() => onDelete(record)}
-                title="Delete ANPR Record"
-                style={{ padding: '6px 12px', fontSize: '11px' }}
+                title="Delete this ANPR detection"
+                style={{ padding: '6px 12px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
               >
-                🗑 Delete
+                🗑 Delete Detection
               </button>
             )}
             <button className="anpr-modal-close" onClick={onClose}>✕</button>
@@ -115,7 +116,7 @@ function EvidenceModal({
           <div className="anpr-modal-img-wrap">
             <img
               src={record.snapshot_url}
-              alt={`ANPR Evidence: ${record.plate_number}`}
+              alt={`ANPR Evidence: ${record.plate_number || 'PLATE UNREADABLE'}`}
               className="anpr-modal-img"
               onError={e => { (e.currentTarget as HTMLImageElement).src = ''; (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
             />
@@ -127,7 +128,7 @@ function EvidenceModal({
         <div className="anpr-modal-meta-grid">
           <div className="anpr-modal-meta-item">
             <span className="anpr-modal-meta-label">Plate Number</span>
-            <span className="anpr-modal-meta-value anpr-plate-bold">{record.plate_number}</span>
+            <span className="anpr-modal-meta-value anpr-plate-bold">{record.plate_number || 'PLATE UNREADABLE'}</span>
           </div>
           <div className="anpr-modal-meta-item">
             <span className="anpr-modal-meta-label">Vehicle Type</span>
@@ -198,7 +199,7 @@ function ANPRCard({
         {record.snapshot_url ? (
           <img
             src={record.snapshot_url}
-            alt={`ANPR: ${record.plate_number}`}
+            alt={`ANPR: ${record.plate_number || 'PLATE UNREADABLE'}`}
             className="anpr-card-img"
             onError={e => {
               (e.currentTarget as HTMLImageElement).parentElement!.innerHTML =
@@ -211,26 +212,19 @@ function ANPRCard({
       </div>
 
       <div className="anpr-card-body">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div className="anpr-card-plate">{record.plate_number}</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <div className="anpr-card-plate">{record.plate_number || 'PLATE UNREADABLE'}</div>
           {onDelete && (
             <button
+              id={`anpr-delete-btn-${record.id}`}
+              className="anpr-card-delete-btn"
               onClick={(e) => {
                 e.stopPropagation();
                 onDelete(record);
               }}
-              style={{
-                background: 'rgba(239, 68, 68, 0.15)',
-                border: '1px solid rgba(239, 68, 68, 0.3)',
-                color: '#f87171',
-                borderRadius: '6px',
-                padding: '3px 7px',
-                fontSize: '11px',
-                cursor: 'pointer'
-              }}
-              title="Delete ANPR record"
+              title="Delete this ANPR detection"
             >
-              🗑
+              🗑 Delete
             </button>
           )}
         </div>
@@ -461,7 +455,7 @@ export default function ANPRView() {
     const newRec: ANPRRecord = {
       id: d.anpr_id || d.id || String(Date.now()),
       camera_id: d.camera_id || '',
-      plate_number: d.plate_number || 'PLATE UNCERTAIN',
+      plate_number: d.plate_number || null,
       vehicle_type: d.vehicle_type || 'UNKNOWN',
       vehicle_track_id: d.vehicle_track_id || null,
       camera_name: d.camera_name || null,
@@ -474,10 +468,13 @@ export default function ANPRView() {
       timestamp: d.timestamp || new Date().toISOString(),
     };
     setRecords(prev => {
-      const filtered = prev.filter(r => r.id !== newRec.id);
-      return [newRec, ...filtered].slice(0, 200);
+      const exists = prev.some(r => r.id === newRec.id);
+      if (exists) {
+        return prev.map(r => r.id === newRec.id ? newRec : r);
+      }
+      setTotal(t => t + 1);
+      return [newRec, ...prev].slice(0, 200);
     });
-    setTotal(t => t + 1);
   }, [lastAnprDetection]);
 
   const handleFilterReset = () => {
@@ -487,19 +484,55 @@ export default function ANPRView() {
   };
 
   const handleDeleteRecord = async (record: ANPRRecord) => {
-    if (!window.confirm(`Are you sure you want to delete ANPR record for plate ${record.plate_number}?`)) return;
+    if (!window.confirm('Delete this ANPR detection?')) return;
     try {
-      const res = await authFetch(`/api/anpr/results/${record.id}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/anpr/${record.id}`, { method: 'DELETE' });
       if (res.ok) {
         setRecords(prev => prev.filter(r => r.id !== record.id));
         setTotal(t => Math.max(0, t - 1));
         if (selectedRecord?.id === record.id) setSelectedRecord(null);
+
+        // Refresh stats from backend database immediately so counters are 100% real
+        try {
+          const statsRes = await authFetch('/api/anpr/stats');
+          if (statsRes.ok) {
+            setStats(await statsRes.json());
+          }
+        } catch { }
       } else {
-        alert('Failed to delete ANPR detection record.');
+        const errData = await res.json().catch(() => ({}));
+        const errDetail = errData.detail || errData.message || `Failed to delete record (${res.status} ${res.statusText})`;
+        alert(errDetail);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to delete ANPR record:', err);
-      alert('Error deleting ANPR record.');
+      alert(`Network error deleting ANPR record: ${err?.message || err}`);
+    }
+  };
+
+  const handleDeleteAll = async () => {
+    if (!window.confirm('Delete all ANPR detection records?')) return;
+    try {
+      const res = await authFetch('/api/anpr/results/all', { method: 'DELETE' });
+      if (res.ok) {
+        setRecords([]);
+        setTotal(0);
+        setSelectedRecord(null);
+        // Refresh stats from backend database immediately
+        try {
+          const statsRes = await authFetch('/api/anpr/stats');
+          if (statsRes.ok) {
+            setStats(await statsRes.json());
+          }
+        } catch { }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        const errDetail = errData.detail || errData.message || `Failed to delete all ANPR records (${res.status} ${res.statusText})`;
+        alert(errDetail);
+      }
+    } catch (err: any) {
+      console.error('Failed to delete all ANPR records:', err);
+      alert(`Network error deleting all ANPR records: ${err?.message || err}`);
     }
   };
 
@@ -588,6 +621,14 @@ export default function ANPRView() {
             </select>
             <button className="anpr-reset-btn" onClick={handleFilterReset}>Reset</button>
             <button className="anpr-refresh-btn" onClick={() => loadData()}>↺ Refresh</button>
+            <button
+              id="anpr-delete-all-btn"
+              className="anpr-delete-all-btn"
+              onClick={handleDeleteAll}
+              title="Delete all ANPR detection records"
+            >
+              🗑 Delete All
+            </button>
           </div>
 
           {/* ── Summary Row ──────────────────────────────────────────────────────  */}

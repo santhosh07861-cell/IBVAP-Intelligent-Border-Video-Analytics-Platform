@@ -58,11 +58,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       const errText = await res.text();
-      const cleanErr = errText.trim().startsWith('<')
-        ? 'Server returned an invalid response. Please verify backend connection.'
-        : errText;
+      let detail = '';
+      try {
+        const errJson = JSON.parse(errText);
+        detail = errJson.detail || errJson.message || errJson.error || '';
+      } catch {
+        // Not JSON format
+      }
 
-      return { success: false, error: `Server error (${res.status}): ${cleanErr || res.statusText}` };
+      if (!detail) {
+        if (errText.trim().startsWith('<')) {
+          detail = 'Server returned an invalid HTML response. Please verify backend connection.';
+        } else if (errText.trim()) {
+          detail = errText.trim();
+        } else if (res.status === 500 || res.status === 502 || res.status === 503 || res.status === 504) {
+          detail = 'Backend service is offline or unreachable on port 8000. Please run the backend server via `npm run backend` or `./venv/bin/python3 -m uvicorn backend.main:app`.';
+        } else {
+          detail = res.statusText;
+        }
+      }
+
+      return { success: false, error: `Server error (${res.status}): ${detail}` };
     } catch (e) {
       console.error("Login failed:", e);
       return { success: false, error: 'Cannot connect to backend server (port 8000). Please ensure python backend is running.' };

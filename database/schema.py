@@ -43,8 +43,8 @@ class Camera(Base):
     name = Column(String(100), nullable=False)
     description = Column(Text)
     location = Column(String(200))
-    latitude = Column(Float, default=26.9124)
-    longitude = Column(Float, default=70.9025)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
     stream_url = Column(String(500), nullable=False)
     protocol = Column(String(20), default="MP4")  # RTSP, WEBCAM, MP4, ONVIF
     role = Column(String(20), default="secondary")  # primary, secondary
@@ -199,8 +199,8 @@ class ANPRResult(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     camera_id = Column(String, ForeignKey("cameras.id"), index=True)
     # plate_number: Normalized OCR output (uppercase, spaces removed).
-    # Value is 'PLATE UNCERTAIN' when OCR confidence is below threshold.
-    plate_number = Column(String(30), nullable=False, index=True)
+    # Value is NULL (None) when plate is not detected or unreadable.
+    plate_number = Column(String(30), nullable=True, index=True)
     vehicle_type = Column(String(30), default="UNKNOWN")  # car, truck, bus, motorcycle, bicycle, van, unknown
     vehicle_track_id = Column(Integer, nullable=True, index=True)  # Track ID from MultiObjectTracker
     camera_name = Column(String(200), nullable=True)
@@ -249,6 +249,8 @@ class FaceWatchlist(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    movement_chain = relationship("WatchlistMovementChain", back_populates="watchlist_person", uselist=False)
 
 class FaceDetection(Base):
     __tablename__ = "face_detections"
@@ -304,6 +306,83 @@ class IncidentNote(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     incident = relationship("Incident", back_populates="notes")
+
+class WatchlistMovementChain(Base):
+    """
+    Chronological Cross-Camera Movement Chain for a specific confirmed Watchlist Person.
+    Maintains active session state, current camera observation, and ordered sequence nodes.
+    Source of truth is strictly persistent database records.
+    """
+    __tablename__ = "watchlist_movement_chains"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    watchlist_person_id = Column(String, ForeignKey("face_watchlist.id"), unique=True, index=True, nullable=False)
+    person_name = Column(String(100), nullable=False)
+    person_id = Column(String(50), nullable=False)  # Badge, ID, or case number
+    category = Column(String(50), default="WATCHLIST")
+    current_camera_id = Column(String, ForeignKey("cameras.id"), nullable=True)
+    current_camera_number = Column(String(50), nullable=True)
+    current_camera_name = Column(String(100), nullable=True)
+    current_location = Column(String(200), nullable=True)
+    current_latitude = Column(Float, nullable=True)
+    current_longitude = Column(Float, nullable=True)
+    status = Column(String(30), default="ACTIVE")  # ACTIVE, LAST_SEEN, NO_CURRENT_DETECTION
+    first_detected_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_detected_at = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+    total_detections = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    watchlist_person = relationship("FaceWatchlist", back_populates="movement_chain")
+    current_camera = relationship("Camera")
+    events = relationship(
+        "WatchlistMovementEvent",
+        back_populates="chain",
+        cascade="all, delete-orphan",
+        order_by="WatchlistMovementEvent.sequence_number"
+    )
+
+class WatchlistMovementEvent(Base):
+    """
+    Single observation node in a confirmed Watchlist Person's movement chain.
+    Aggregates multi-frame detections at a single camera into one observation session
+    (first_seen_at to last_seen_at). A new node is created only when transitioning to
+    another camera or after a prolonged absence session window.
+    """
+    __tablename__ = "watchlist_movement_events"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    chain_id = Column(String, ForeignKey("watchlist_movement_chains.id"), index=True, nullable=False)
+    sequence_number = Column(Integer, nullable=False, default=1)
+    watchlist_person_id = Column(String, ForeignKey("face_watchlist.id"), index=True, nullable=False)
+    watchlist_person_name = Column(String(100), nullable=False)
+    camera_id = Column(String, ForeignKey("cameras.id"), index=True, nullable=False)
+    camera_number = Column(String(50), nullable=False)
+    camera_name = Column(String(100), nullable=False)
+    location = Column(String(200), nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    first_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    confidence = Column(Float, default=0.0)
+    face_similarity = Column(Float, default=0.0)
+    track_id = Column(Integer, nullable=True)
+    evidence_id = Column(String, ForeignKey("evidence.id"), nullable=True)
+    evidence_url = Column(String(500), nullable=True)
+    crop_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    chain = relationship("WatchlistMovementChain", back_populates="events")
+    watchlist_person = relationship("FaceWatchlist")
+    camera = relationship("Camera")
+    evidence = relationship("Evidence")
+
+    @property
+    def event_date(self) -> str:
+        return self.timestamp.strftime("%Y-%m-%d") if self.timestamp else ""
+
+    @property
+    def event_time(self) -> str:
+        return self.timestamp.strftime("%H:%M:%S") if self.timestamp else ""
 
 class Notification(Base):
     __tablename__ = "notifications"

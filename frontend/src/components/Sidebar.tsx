@@ -4,7 +4,7 @@ import { useWebSocket } from '../context/WebSocketContext';
 import {
   LayoutDashboard, Video, Globe, Camera, Shapes, Bell, AlertOctagon,
   FileText, UserCheck, BarChart3, HeartPulse, Cpu,
-  ShieldCheck, Scan, Link2
+  ShieldCheck, Scan, Link2, Route as RouteIcon
 } from 'lucide-react';
 
 const navItems = [
@@ -18,6 +18,7 @@ const navItems = [
   { path: '/evidence', label: 'AI Detection History', icon: Scan },
   { path: '/anpr', label: 'ANPR License Plates', icon: FileText },
   { path: '/faces', label: 'Face Detections', icon: UserCheck },
+  { path: '/watchlist-movement', label: 'Watchlist Movement Tracking', icon: RouteIcon },
   { path: '/analytics', label: 'Border Analytics', icon: BarChart3 },
   { path: '/system-health', label: 'System Health', icon: HeartPulse },
   { path: '/models', label: 'AI Model Registry', icon: Cpu },

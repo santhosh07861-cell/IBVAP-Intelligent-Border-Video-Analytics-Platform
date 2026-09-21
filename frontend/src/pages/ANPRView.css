@@ -137,6 +137,27 @@
 .anpr-refresh-btn { background: #1e3a5f; border-color: #2563eb; color: #60a5fa; }
 .anpr-refresh-btn:hover { background: #1d4ed8; color: #fff; }
 
+.anpr-delete-all-btn {
+  background: #450a0a;
+  border: 1px solid #991b1b;
+  border-radius: 8px;
+  color: #fca5a5;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 7px 14px;
+  cursor: pointer;
+  height: 34px;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.anpr-delete-all-btn:hover {
+  background: #7f1d1d;
+  border-color: #ef4444;
+  color: #fff;
+}
+
 /* ── Summary Row ─────────────────────────────────────────────────────────────── */
 .anpr-summary-row {
   display: flex;
@@ -498,6 +519,29 @@
 .anpr-action-btn:hover { background: #334155; color: #e2e8f0; }
 .anpr-action-delete { border-color: #7f1d1d; color: #fca5a5; }
 .anpr-action-delete:hover { background: #7f1d1d; color: #fef2f2; }
+
+.anpr-card-delete-btn {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.28);
+  color: #f87171;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+.anpr-card-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #fff;
+  transform: translateY(-1px);
+}
 
 /* ── Responsive ──────────────────────────────────────────────────────────────── */
 @media (max-width: 1024px) {

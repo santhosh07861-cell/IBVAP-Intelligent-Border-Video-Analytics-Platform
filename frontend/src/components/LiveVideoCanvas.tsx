@@ -4,6 +4,7 @@ import { Eye, Moon, Bug, RotateCw } from 'lucide-react';
 interface LiveVideoCanvasProps {
   cameraId?: string;
   cameraName?: string;
+  status?: string;
   detections?: Array<{
     track_id: number;
     class_name: string;
@@ -33,6 +34,7 @@ interface LiveVideoCanvasProps {
   latencyMs?: number;
   inferenceMode?: string;
   cameraRole?: 'primary' | 'secondary';
+  protocol?: string;
   hideObjectDetections?: boolean;
   rotation?: number;
   onRotate?: (newRotation: number) => void;
@@ -41,12 +43,14 @@ interface LiveVideoCanvasProps {
 export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
   cameraId,
   cameraName,
+  status,
   detections = [],
   faces = [],
   fps = 0.0,
   latencyMs = 0.0,
   inferenceMode,
   cameraRole,
+  protocol,
   hideObjectDetections = false,
   rotation = 0,
   onRotate
@@ -64,11 +68,67 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
 
   const [activeZones, setActiveZones] = useState<Array<{ id: string; name: string; zone_type: string; coordinates: number[][] }>>([]);
 
-  const isStreaming = Boolean(cameraId && !imageError);
+  // Normalize and determine genuine camera status
+  const normalizedStatus = (status || '').toUpperCase().trim();
+  const isMp4 = (protocol || '').toUpperCase() === 'MP4' || ['READY', 'PLAYING', 'PROCESSING', 'COMPLETED', 'FILE ERROR', 'FILE_ERROR'].includes(normalizedStatus);
+  let effectiveStatus: 'ONLINE' | 'CONNECTING' | 'UNREACHABLE' | 'NO_FRAMES' | 'STOPPED' | 'OFFLINE' | 'READY' | 'PLAYING' | 'PROCESSING' | 'COMPLETED' | 'FILE ERROR';
+
+  if (!cameraId) {
+    effectiveStatus = 'OFFLINE';
+  } else if (normalizedStatus === 'STOPPED' || normalizedStatus === 'DISCONNECTED') {
+    effectiveStatus = 'STOPPED';
+  } else if (normalizedStatus === 'COMPLETED') {
+    effectiveStatus = 'COMPLETED';
+  } else if (normalizedStatus === 'FILE ERROR' || normalizedStatus === 'FILE_ERROR') {
+    effectiveStatus = 'FILE ERROR';
+  } else if (normalizedStatus === 'READY') {
+    effectiveStatus = fps > 0 ? 'PLAYING' : 'READY';
+  } else if (normalizedStatus === 'PLAYING' || normalizedStatus === 'PROCESSING') {
+    effectiveStatus = fps > 0 ? normalizedStatus as any : 'PROCESSING';
+  } else if (isMp4) {
+    // For MP4 sources, NEVER show network states (UNREACHABLE / NETWORK ERROR)
+    if (imageError || normalizedStatus === 'UNREACHABLE') {
+      effectiveStatus = 'FILE ERROR';
+    } else {
+      effectiveStatus = fps > 0 ? 'PLAYING' : 'READY';
+    }
+  } else if (normalizedStatus === 'UNREACHABLE' || imageError) {
+    effectiveStatus = 'UNREACHABLE';
+  } else if (normalizedStatus === 'NO_FRAMES') {
+    effectiveStatus = 'NO_FRAMES';
+  } else if (normalizedStatus === 'CONNECTING' || normalizedStatus === 'RECONNECTING') {
+    effectiveStatus = fps > 0 ? 'ONLINE' : 'CONNECTING';
+  } else if (normalizedStatus === 'ONLINE') {
+    effectiveStatus = fps > 0 ? 'ONLINE' : 'CONNECTING';
+  } else {
+    effectiveStatus = fps > 0 ? 'ONLINE' : (cameraId ? 'CONNECTING' : 'OFFLINE');
+  }
+
+  const isLive = (effectiveStatus === 'ONLINE' || effectiveStatus === 'PLAYING' || effectiveStatus === 'PROCESSING') && fps > 0;
+  const isFeedActive = Boolean(
+    cameraId &&
+    !imageError &&
+    effectiveStatus !== 'STOPPED' &&
+    effectiveStatus !== 'OFFLINE' &&
+    effectiveStatus !== 'COMPLETED' &&
+    effectiveStatus !== 'FILE ERROR'
+  );
+
+  const [retryKey, setRetryKey] = useState<number>(0);
 
   useEffect(() => {
     setImageError(false);
-  }, [cameraId]);
+  }, [cameraId, status]);
+
+  useEffect(() => {
+    if (imageError && effectiveStatus !== 'STOPPED' && effectiveStatus !== 'OFFLINE') {
+      const timer = setTimeout(() => {
+        setImageError(false);
+        setRetryKey(k => k + 1);
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [imageError, effectiveStatus]);
 
   useEffect(() => {
     if (!cameraId) {
@@ -92,7 +152,8 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       }
     };
     fetchZonesForCam();
-    const interval = setInterval(fetchZonesForCam, 5000);
+    // Refresh zones periodically (every 60s) without aggressive 5s HTTP polling
+    const interval = setInterval(fetchZonesForCam, 60000);
     return () => clearInterval(interval);
   }, [cameraId]);
 
@@ -111,14 +172,14 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       const h = canvas.height;
 
       // 1. Thermal or Night Vision background overlay
-      if (isStreaming && thermalMode) {
+      if (isLive && thermalMode) {
         const grad = ctx.createLinearGradient(0, 0, 0, h);
         grad.addColorStop(0, '#0a0314');
         grad.addColorStop(0.5, '#19082b');
         grad.addColorStop(1, '#05020a');
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
-      } else if (isStreaming && nightVision) {
+      } else if (isLive && nightVision) {
         const grad = ctx.createLinearGradient(0, 0, 0, h);
         grad.addColorStop(0, '#021208');
         grad.addColorStop(0.5, '#04220f');
@@ -127,7 +188,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
         ctx.fillRect(0, 0, w, h);
       } else {
         ctx.clearRect(0, 0, w, h);
-        if (!isStreaming) {
+        if (!isLive) {
           const grad = ctx.createLinearGradient(0, 0, 0, h);
           grad.addColorStop(0, '#0f172a');
           grad.addColorStop(1, '#020617');
@@ -137,7 +198,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       }
 
       // 2. Tactical Crosshairs
-      if (isStreaming) {
+      if (isLive) {
         const cx = w / 2;
         const cy = h / 2;
         ctx.strokeStyle = nightVision ? 'rgba(16, 185, 129, 0.3)' : 'rgba(59, 130, 246, 0.3)';
@@ -152,7 +213,7 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       }
 
       // 3. Dynamic Real Database Virtual Fence Zones Overlay for this Camera
-      if (isStreaming && activeZones.length > 0) {
+      if (isLive && activeZones.length > 0) {
         activeZones.forEach((zone) => {
           if (!zone.coordinates || zone.coordinates.length < 3) return;
           ctx.save();
@@ -179,25 +240,83 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
         });
       }
 
-      // 4. Inactive Card State
-      if (!isStreaming) {
+      // 4. Inactive Card State Overlay
+      if (!isLive) {
         ctx.save();
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-        ctx.fillRect(w * 0.20, h * 0.35, w * 0.60, h * 0.30);
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
-        ctx.strokeRect(w * 0.20, h * 0.35, w * 0.60, h * 0.30);
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+        ctx.fillRect(w * 0.15, h * 0.32, w * 0.70, h * 0.36);
+        ctx.strokeStyle =
+          effectiveStatus === 'COMPLETED' ? 'rgba(168, 85, 247, 0.4)' :
+          effectiveStatus === 'FILE ERROR' ? 'rgba(239, 68, 68, 0.4)' :
+          effectiveStatus === 'READY' ? 'rgba(56, 189, 248, 0.4)' :
+          effectiveStatus === 'UNREACHABLE' ? 'rgba(239, 68, 68, 0.4)' :
+          effectiveStatus === 'NO_FRAMES' ? 'rgba(245, 158, 11, 0.4)' :
+          effectiveStatus === 'CONNECTING' ? 'rgba(56, 189, 248, 0.4)' :
+          'rgba(148, 163, 184, 0.25)';
+        ctx.strokeRect(w * 0.15, h * 0.32, w * 0.70, h * 0.36);
 
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = 'bold 15px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('CAMERA FEED OFFLINE', w / 2, h * 0.46);
-        ctx.font = '11px monospace';
-        ctx.fillStyle = '#64748b';
-        ctx.fillText('Start this camera stream in Camera Management.', w / 2, h * 0.54);
+        if (effectiveStatus === 'COMPLETED') {
+          ctx.fillStyle = '#c084fc';
+          ctx.font = 'bold 15px monospace';
+          ctx.fillText('VIDEO COMPLETED', w / 2, h * 0.47);
+          ctx.font = '11px monospace';
+          ctx.fillStyle = '#cbd5e1';
+          ctx.fillText('Video reached the end. AI processing completed.', w / 2, h * 0.55);
+        } else if (effectiveStatus === 'FILE ERROR') {
+          ctx.fillStyle = '#f87171';
+          ctx.font = 'bold 15px monospace';
+          ctx.fillText('FILE ERROR', w / 2, h * 0.47);
+          ctx.font = '11px monospace';
+          ctx.fillStyle = '#fca5a5';
+          ctx.fillText('Video file cannot be opened or read. Check file path.', w / 2, h * 0.55);
+        } else if (effectiveStatus === 'READY') {
+          ctx.fillStyle = '#38bdf8';
+          ctx.font = 'bold 15px monospace';
+          ctx.fillText('VIDEO READY', w / 2, h * 0.47);
+          ctx.font = '11px monospace';
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText('MP4 source verified. Click START CAMERA to stream & process.', w / 2, h * 0.55);
+        } else if (effectiveStatus === 'STOPPED') {
+          ctx.fillStyle = '#94a3b8';
+          ctx.font = 'bold 15px monospace';
+          ctx.fillText('CAMERA FEED STOPPED', w / 2, h * 0.47);
+          ctx.font = '11px monospace';
+          ctx.fillStyle = '#64748b';
+          ctx.fillText('Click START CAMERA in Camera Management to stream.', w / 2, h * 0.55);
+        } else if (effectiveStatus === 'CONNECTING' || effectiveStatus === 'PROCESSING') {
+          ctx.fillStyle = '#38bdf8';
+          ctx.font = 'bold 15px monospace';
+          ctx.fillText(effectiveStatus === 'PROCESSING' ? 'PROCESSING VIDEO FEED' : 'CONNECTING / WAITING FOR FIRST FRAME', w / 2, h * 0.47);
+          ctx.font = '11px monospace';
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText('Establishing video ingestion pipeline...', w / 2, h * 0.55);
+        } else if (effectiveStatus === 'UNREACHABLE') {
+          ctx.fillStyle = '#f87171';
+          ctx.font = 'bold 15px monospace';
+          ctx.fillText('CAMERA UNREACHABLE', w / 2, h * 0.47);
+          ctx.font = '11px monospace';
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText('No route to camera host. Check IP and network connection.', w / 2, h * 0.55);
+        } else if (effectiveStatus === 'NO_FRAMES') {
+          ctx.fillStyle = '#fbbf24';
+          ctx.font = 'bold 15px monospace';
+          ctx.fillText('NO LIVE FRAME RECEIVED', w / 2, h * 0.47);
+          ctx.font = '11px monospace';
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText('Stream connected but source has delivered 0 FPS.', w / 2, h * 0.55);
+        } else {
+          ctx.fillStyle = '#94a3b8';
+          ctx.font = 'bold 15px monospace';
+          ctx.fillText('CAMERA FEED OFFLINE', w / 2, h * 0.47);
+          ctx.font = '11px monospace';
+          ctx.fillStyle = '#64748b';
+          ctx.fillText('Start this camera stream in Camera Management.', w / 2, h * 0.55);
+        }
         ctx.restore();
       }
 
-      if (isStreaming) {
+      if (isLive) {
         // A. General Object Bounding Boxes (suppressed on dedicated Face Intelligence page)
         if (!hideObjectDetections) {
           (detections || []).forEach((det) => {
@@ -306,37 +425,60 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       // 5. Header Status Bar
       ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
       ctx.fillRect(10, 10, 380, 36);
-      ctx.strokeStyle = 'rgba(59, 130, 246, 0.4)';
+      ctx.strokeStyle =
+        isLive ? 'rgba(59, 130, 246, 0.4)' :
+        effectiveStatus === 'CONNECTING' ? 'rgba(56, 189, 248, 0.4)' :
+        effectiveStatus === 'UNREACHABLE' ? 'rgba(239, 68, 68, 0.4)' :
+        effectiveStatus === 'NO_FRAMES' ? 'rgba(245, 158, 11, 0.4)' :
+        'rgba(148, 163, 184, 0.2)';
       ctx.strokeRect(10, 10, 380, 36);
 
-      ctx.fillStyle = isStreaming ? (nightVision ? '#10b981' : '#38bdf8') : '#64748b';
+      const headerColor =
+        isLive ? (nightVision ? '#10b981' : '#38bdf8') :
+        effectiveStatus === 'CONNECTING' ? '#38bdf8' :
+        effectiveStatus === 'UNREACHABLE' ? '#f87171' :
+        effectiveStatus === 'NO_FRAMES' ? '#fbbf24' : '#64748b';
+
+      const statusTag =
+        isLive ? 'LIVE STREAM' :
+        effectiveStatus === 'CONNECTING' ? 'CONNECTING' :
+        effectiveStatus === 'UNREACHABLE' ? 'UNREACHABLE' :
+        effectiveStatus === 'NO_FRAMES' ? 'NO FRAMES' :
+        effectiveStatus === 'STOPPED' ? 'STOPPED' : 'OFFLINE';
+
+      ctx.fillStyle = headerColor;
       ctx.font = 'bold 11px monospace';
       ctx.fillText(
-        isStreaming ? `● LIVE STREAM | ${cameraId || 'CAM'} ${cameraName ? '- ' + cameraName : ''}` : '● CAMERA OFFLINE',
+        `● ${statusTag} | ${cameraId || 'CAM'} ${cameraName ? '- ' + cameraName : ''}`,
         20, 26
       );
       ctx.fillStyle = '#94a3b8';
       ctx.font = '10px monospace';
       ctx.fillText(
-        isStreaming ? `ROLE: ${(cameraRole || 'CAMERA').toUpperCase()} | TIME: ${new Date().toISOString().substring(11, 19)} UTC` : 'STREAM INACTIVE',
+        `ROLE: ${(cameraRole || 'CAMERA').toUpperCase()} | TIME: ${new Date().toISOString().substring(11, 19)} UTC`,
         20, 39
       );
-
-      animFrameId = requestAnimationFrame(render);
     };
 
+    // Render once whenever detection props, streaming state, or display modes change
     render();
 
+    // 1 Hz interval to update tactical clock without burning 60 FPS GPU/CPU
+    const clockInterval = setInterval(() => {
+      render();
+    }, 1000);
+
     return () => {
-      cancelAnimationFrame(animFrameId);
+      clearInterval(clockInterval);
     };
-  }, [thermalMode, nightVision, detections, faces, isStreaming, cameraId, cameraName, cameraRole, fps]);
+  }, [thermalMode, nightVision, detections, faces, isLive, effectiveStatus, cameraId, cameraName, cameraRole, fps, activeZones, currentRotation]);
 
   return (
     <div className="relative aspect-video bg-slate-950 rounded-lg overflow-hidden border border-[#252d42] group">
-      {cameraId && !imageError && (
+      {isFeedActive && (
         <img
-          src={`/api/cameras/${cameraId}/stream`}
+          key={`${cameraId}_${retryKey}`}
+          src={`/api/cameras/${cameraId}/stream?r=${retryKey}`}
           alt="Live Camera Stream"
           className="absolute inset-0 w-full h-full object-cover pointer-events-none"
           onError={() => setImageError(true)}
@@ -357,12 +499,12 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
             <span className="text-slate-400">{cameraId}</span>
           </div>
           <div>Role: <strong>{cameraRole || 'secondary'}</strong></div>
-          <div>Status: <strong>{isStreaming ? (fps > 0 ? 'STREAMING' : 'CONNECTING') : 'OFFLINE'}</strong></div>
+          <div>Status: <strong>{effectiveStatus}</strong></div>
           <div>Rotation: <strong>{currentRotation}°</strong></div>
-          <div>Video FPS: <strong>{isStreaming ? fps : 0}</strong></div>
-          <div>AI Latency: <strong>{isStreaming ? `${latencyMs}ms` : 'N/A'}</strong></div>
-          <div>{hideObjectDetections ? 'Faces Tracked' : 'Objects Tracked'}: <strong>{isStreaming ? (hideObjectDetections ? (faces?.length || 0) : detections.length) : 0}</strong></div>
-          <div>Inference: <strong>{isStreaming ? (fps > 0 ? (inferenceMode || 'REAL AI | RUNNING') : 'INPUT NOT RECEIVED') : 'OFFLINE'}</strong></div>
+          <div>Video FPS: <strong>{isLive ? fps : 0}</strong></div>
+          <div>AI Latency: <strong>{isLive ? `${latencyMs}ms` : 'N/A'}</strong></div>
+          <div>{hideObjectDetections ? 'Faces Tracked' : 'Objects Tracked'}: <strong>{isLive ? (hideObjectDetections ? (faces?.length || 0) : detections.length) : 0}</strong></div>
+          <div>Inference: <strong>{isLive ? (inferenceMode || 'REAL AI | RUNNING') : effectiveStatus}</strong></div>
         </div>
       )}
 
@@ -385,9 +527,9 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
               }).catch(() => {});
             }
           }}
-          disabled={!isStreaming}
+          disabled={!isFeedActive}
           className={`px-2 py-1 rounded text-[10px] font-mono font-bold flex items-center gap-1 transition-colors ${
-            !isStreaming
+            !isFeedActive
               ? 'opacity-40 cursor-not-allowed text-slate-500 bg-slate-800'
               : currentRotation > 0
               ? 'bg-blue-600 text-white'
@@ -407,10 +549,10 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
           <Bug className="w-3.5 h-3.5" />
         </button>
         <button
-          onClick={() => { if (isStreaming) { setNightVision(!nightVision); setThermalMode(false); } }}
-          disabled={!isStreaming}
+          onClick={() => { if (isFeedActive) { setNightVision(!nightVision); setThermalMode(false); } }}
+          disabled={!isFeedActive}
           className={`px-2 py-1 rounded text-[10px] font-mono font-bold flex items-center gap-1 transition-colors ${
-            !isStreaming
+            !isFeedActive
               ? 'opacity-40 cursor-not-allowed text-slate-500 bg-slate-800'
               : nightVision
               ? 'bg-emerald-600 text-white'
@@ -421,10 +563,10 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
           <Moon className="w-3 h-3" /> NIGHT
         </button>
         <button
-          onClick={() => { if (isStreaming) { setThermalMode(!thermalMode); setNightVision(false); } }}
-          disabled={!isStreaming}
+          onClick={() => { if (isFeedActive) { setThermalMode(!thermalMode); setNightVision(false); } }}
+          disabled={!isFeedActive}
           className={`px-2 py-1 rounded text-[10px] font-mono font-bold flex items-center gap-1 transition-colors ${
-            !isStreaming
+            !isFeedActive
               ? 'opacity-40 cursor-not-allowed text-slate-500 bg-slate-800'
               : thermalMode
               ? 'bg-purple-600 text-white'
@@ -439,26 +581,54 @@ export const LiveVideoCanvas: React.FC<LiveVideoCanvasProps> = ({
       {/* Footer Telemetry */}
       <div className="absolute bottom-0 left-0 right-0 p-2.5 bg-slate-950/90 border-t border-[#252d42] flex items-center justify-between text-[11px] text-slate-400 font-mono z-20">
         <div className="flex items-center gap-3">
-          <span>FPS: <strong className={isStreaming && fps > 0 ? 'text-emerald-400' : 'text-slate-500'}>{isStreaming ? fps : 0}</strong></span>
-          <span>LATENCY: <strong className={isStreaming && fps > 0 ? 'text-blue-400' : 'text-slate-500'}>{isStreaming && fps > 0 ? `${latencyMs}ms` : 'N/A'}</strong></span>
+          <span>FPS: <strong className={isLive ? 'text-emerald-400' : 'text-slate-500'}>{isLive ? fps : 0}</strong></span>
+          <span>LATENCY: <strong className={isLive ? 'text-blue-400' : 'text-slate-500'}>{isLive ? `${latencyMs}ms` : 'N/A'}</strong></span>
           {hideObjectDetections ? (
-            <span>FACES: <strong className={isStreaming && faces.length > 0 ? 'text-blue-400 font-bold' : 'text-slate-400'}>{isStreaming ? faces.length : 0}</strong></span>
+            <span>FACES: <strong className={isLive && faces.length > 0 ? 'text-blue-400 font-bold' : 'text-slate-400'}>{isLive ? faces.length : 0}</strong></span>
           ) : (
-            <span>OBJECTS: <strong className={isStreaming && detections.length > 0 ? 'text-amber-400' : 'text-slate-500'}>{isStreaming ? detections.length : 0}</strong></span>
+            <span>OBJECTS: <strong className={isLive && detections.length > 0 ? 'text-amber-400' : 'text-slate-500'}>{isLive ? detections.length : 0}</strong></span>
           )}
         </div>
-        {isStreaming ? (
-          fps > 0 ? (
-            <span className="text-emerald-400 font-bold tracking-wider font-mono flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              {inferenceMode || 'REAL AI | INFERENCE RUNNING'}
-            </span>
-          ) : (
-            <span className="text-amber-400 font-bold tracking-wider font-mono flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
-              CAMERA: ONLINE | AI FRAME INPUT: NOT RECEIVED
-            </span>
-          )
+        {effectiveStatus === 'STOPPED' ? (
+          <span className="text-slate-400 font-mono font-bold flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-slate-500" />
+            CAMERA STOPPED
+          </span>
+        ) : effectiveStatus === 'COMPLETED' ? (
+          <span className="text-purple-400 font-mono font-bold flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-purple-500" />
+            COMPLETED
+          </span>
+        ) : effectiveStatus === 'FILE ERROR' ? (
+          <span className="text-rose-400 font-mono font-bold flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-rose-500" />
+            FILE ERROR
+          </span>
+        ) : effectiveStatus === 'READY' ? (
+          <span className="text-sky-400 font-mono font-bold flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-sky-400" />
+            READY
+          </span>
+        ) : effectiveStatus === 'UNREACHABLE' ? (
+          <span className="text-rose-400 font-mono font-bold flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-rose-500" />
+            UNREACHABLE / NETWORK ERROR
+          </span>
+        ) : effectiveStatus === 'CONNECTING' ? (
+          <span className="text-cyan-400 font-mono font-bold flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+            CONNECTING / WAITING FOR FIRST FRAME
+          </span>
+        ) : isLive ? (
+          <span className="text-emerald-400 font-bold tracking-wider font-mono flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            {inferenceMode || (effectiveStatus === 'PLAYING' ? 'PLAYING | REAL AI INFERENCE' : 'ONLINE | REAL AI INFERENCE RUNNING')}
+          </span>
+        ) : effectiveStatus === 'NO_FRAMES' || (effectiveStatus === 'ONLINE' && fps === 0) ? (
+          <span className="text-amber-400 font-bold tracking-wider font-mono flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+            NO LIVE FRAME RECEIVED
+          </span>
         ) : (
           <span className="text-slate-500 font-mono">CAMERA OFFLINE</span>
         )}

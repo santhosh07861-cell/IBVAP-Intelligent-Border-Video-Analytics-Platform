@@ -1,18 +1,19 @@
-import React, { useEffect, useState } from 'react';
-import { Camera, Plus, CheckCircle2, RefreshCw, X, Play, Square, Trash2, Video, AlertTriangle, Shield, Cpu, Wifi, Search, RotateCw } from 'lucide-react';
+import React, { useEffect, useState, useRef } from 'react';
+import { Camera, Plus, CheckCircle2, RefreshCw, X, Play, Square, Trash2, Video, AlertTriangle, Shield, Cpu, Wifi, Search, RotateCw, ExternalLink, HardDrive, UploadCloud } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useLocation } from 'react-router-dom';
+import { checkCameraApiSupport, classifyCameraError, browserCameraStreamManager } from '../utils/browserCameraStreamManager';
 
 const validateClientUrl = (url: string, proto: string): string | null => {
   if (proto === 'WEBCAM') {
-    if (!url || !url.trim() || !/^\d+$/.test(url.trim())) {
-      return 'Invalid camera URL. For WEBCAM, enter a valid device index (e.g. 0 or 1).';
+    if (!url || !url.trim()) {
+      return 'Please select a valid hardware camera device or enter a device index (e.g. 0 or 1).';
     }
     return null;
   }
   if (proto === 'MP4') {
     if (!url || !url.trim()) {
-      return 'Invalid video path. Please enter a video path or URL.';
+      return 'Invalid video path. Please select an MP4 video file or enter a valid file path.';
     }
     return null;
   }
@@ -53,7 +54,77 @@ export const CameraList: React.FC = () => {
   const [discoveredStreams, setDiscoveredStreams] = useState<Array<{ ip: string; port: number; app: string; stream_url: string; label: string }>>([]);
   const [webcamStatus, setWebcamStatus] = useState<string | null>(null);
   const [availableDevices, setAvailableDevices] = useState<Array<{ deviceId: string; label: string; index: number }>>([]);
+  const [webcamMode, setWebcamMode] = useState<'browser' | 'host'>('browser');
+  const [apiDiagnostic, setApiDiagnostic] = useState(checkCameraApiSupport());
   const [networkInfo, setNetworkInfo] = useState<{ server_ip: string; subnet: string; sample_phone_url?: string } | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingMp4, setUploadingMp4] = useState(false);
+  const [uploadedMp4Info, setUploadedMp4Info] = useState<{
+    filename: string;
+    size_bytes: number;
+    width: number;
+    height: number;
+    fps: number;
+    duration_sec: number;
+  } | null>(null);
+
+  const handleMp4FileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingMp4(true);
+    setErrorMessage(null);
+    setTestResult(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const authToken = token || localStorage.getItem('ibvap_token');
+      const res = await fetch('/api/cameras/upload-mp4', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: formData
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setErrorMessage(data.detail || data.message || 'Failed to upload MP4 video file.');
+      } else {
+        setForm(prev => ({
+          ...prev,
+          stream_url: data.file_path,
+          name: (!prev.name || prev.name.startsWith('Camera CAM-'))
+            ? file.name.replace(/\.[^/.]+$/, '').replace(/[_.-]/g, ' ')
+            : prev.name
+        }));
+        setUploadedMp4Info({
+          filename: data.filename,
+          size_bytes: data.size_bytes,
+          width: data.width,
+          height: data.height,
+          fps: data.fps,
+          duration_sec: data.duration_sec
+        });
+        setTestResult({
+          status: 'SUCCESS',
+          source_type: 'mp4',
+          fps: data.fps,
+          width: data.width,
+          height: data.height,
+          message: data.message
+        });
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error uploading MP4 video file.');
+    } finally {
+      setUploadingMp4(false);
+      if (e.target) e.target.value = '';
+    }
+  };
 
   const { token, user } = useAuth();
   const location = useLocation();
@@ -66,6 +137,7 @@ export const CameraList: React.FC = () => {
     protocol: 'WEBCAM', // WEBCAM, RTSP, MP4
     stream_url: '0',
     rotation: 0,
+    role: 'secondary',
     latitude: 26.9124,
     longitude: 70.9025
   });
@@ -94,20 +166,36 @@ export const CameraList: React.FC = () => {
   };
 
   const enumerateWebcams = async () => {
-    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = devices
-          .filter((d) => d.kind === 'videoinput')
-          .map((d, idx) => ({
-            deviceId: d.deviceId,
-            label: d.label || `Camera Device ${idx}`,
-            index: idx
-          }));
-        setAvailableDevices(videoDevices);
-      } catch (err) {
-        console.warn('Error enumerating video devices:', err);
+    const diag = checkCameraApiSupport();
+    setApiDiagnostic(diag);
+    if (!diag.supported) {
+      setWebcamMode('host');
+      return;
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices
+        .filter((d) => d.kind === 'videoinput')
+        .map((d, idx) => ({
+          deviceId: d.deviceId,
+          label: d.label || `Camera Device ${idx + 1}`,
+          index: idx
+        }));
+      setAvailableDevices(videoDevices);
+      if (videoDevices.length > 0) {
+        setWebcamMode('browser');
+        setForm(prev => {
+          const usedIds = new Set(cameras.map(c => c.stream_url).filter(Boolean));
+          const chosen = videoDevices.find(d => !usedIds.has(d.deviceId)) || videoDevices[0];
+          return {
+            ...prev,
+            stream_url: prev.stream_url && prev.stream_url !== '0' ? prev.stream_url : chosen.deviceId,
+            name: prev.name || chosen.label
+          };
+        });
       }
+    } catch (err) {
+      console.warn('Error enumerating video devices:', err);
     }
   };
 
@@ -189,15 +277,13 @@ export const CameraList: React.FC = () => {
     setErrorMessage(null);
 
     let urlToTest = form.stream_url.trim ? form.stream_url.trim() : form.stream_url;
+    if ((urlToTest.startsWith("'") && urlToTest.endsWith("'")) || (urlToTest.startsWith('"') && urlToTest.endsWith('"'))) {
+      urlToTest = urlToTest.slice(1, -1).trim();
+    }
     if (urlToTest.startsWith('https://') && (urlToTest.includes(':8080') || urlToTest.includes(':4747') || urlToTest.includes('192.168.') || urlToTest.includes('10.'))) {
       urlToTest = urlToTest.replace(/^https:\/\//, 'http://');
       setForm(prev => ({ ...prev, stream_url: urlToTest }));
     }
-    if ((urlToTest.startsWith('http://') || urlToTest.startsWith('https://')) && !urlToTest.includes('/video') && !urlToTest.includes('/shot.jpg') && !urlToTest.endsWith('.mp4')) {
-      urlToTest = urlToTest.replace(/\/$/, '') + '/video';
-      setForm(prev => ({ ...prev, stream_url: urlToTest }));
-    }
-
     const valErr = validateClientUrl(urlToTest, form.protocol);
     if (valErr) {
       setErrorMessage(valErr);
@@ -246,14 +332,14 @@ export const CameraList: React.FC = () => {
     setSubmitting(true);
 
     const cid = form.camera_id || `CAM-${Date.now().toString().slice(-4)}`;
-    const camName = form.name || `Camera ${cid}`;
+    let camName = form.name || `Camera ${cid}`;
 
     let urlToSave = form.stream_url.trim();
+    if ((urlToSave.startsWith("'") && urlToSave.endsWith("'")) || (urlToSave.startsWith('"') && urlToSave.endsWith('"'))) {
+      urlToSave = urlToSave.slice(1, -1).trim();
+    }
     if (urlToSave.startsWith('https://') && (urlToSave.includes(':8080') || urlToSave.includes(':4747') || urlToSave.includes('192.168.') || urlToSave.includes('10.'))) {
       urlToSave = urlToSave.replace(/^https:\/\//, 'http://');
-    }
-    if ((urlToSave.startsWith('http://') || urlToSave.startsWith('https://')) && !urlToSave.includes('/video') && !urlToSave.includes('/shot.jpg') && !urlToSave.endsWith('.mp4')) {
-      urlToSave = urlToSave.replace(/\/$/, '') + '/video';
     }
 
     const valErr = validateClientUrl(urlToSave, form.protocol);
@@ -264,33 +350,46 @@ export const CameraList: React.FC = () => {
     }
 
     if (form.protocol === 'WEBCAM') {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setErrorMessage('NO CAMERA DEVICE FOUND / Browser mediaDevices API not supported.');
-        setSubmitting(false);
-        return;
-      }
-
-      try {
-        setWebcamStatus('Requesting browser camera permission...');
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        stream.getTracks().forEach(track => track.stop());
-        setWebcamStatus('Camera permission granted!');
-        await enumerateWebcams();
-      } catch (err: any) {
-        console.error('Webcam permission error:', err);
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          setErrorMessage('CAMERA PERMISSION DENIED. Please grant camera access in browser settings.');
-        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-          setErrorMessage('NO CAMERA DEVICE FOUND. Ensure a camera hardware is connected.');
-        } else {
-          setErrorMessage(`Webcam Error: ${err.message || 'Unable to access camera.'}`);
+      if (webcamMode === 'browser') {
+        const diag = checkCameraApiSupport();
+        if (!diag.supported) {
+          setErrorMessage(`${diag.title}: ${diag.message}\nRemedy: ${diag.remedies.join(' | ')}`);
+          setSubmitting(false);
+          return;
         }
-        setSubmitting(false);
-        return;
+
+        try {
+          setWebcamStatus('Requesting browser camera permission...');
+          const selectedDeviceId = form.stream_url && form.stream_url !== '0' ? form.stream_url : undefined;
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true
+          });
+          const track = stream.getVideoTracks()[0];
+          const actualDevId = track?.getSettings()?.deviceId || track?.label || form.stream_url;
+          const actualLabel = track?.label;
+          stream.getTracks().forEach(t => t.stop());
+          setWebcamStatus('Camera hardware verified & permission granted!');
+          if (actualDevId && actualDevId !== '0') {
+            urlToSave = actualDevId;
+          }
+          if ((!form.name || form.name.startsWith('Camera CAM-')) && actualLabel) {
+            camName = actualLabel;
+          }
+          await enumerateWebcams();
+        } catch (err: any) {
+          console.error('Webcam permission error:', err);
+          const classified = classifyCameraError(err);
+          setErrorMessage(`${classified.title}: ${classified.message}`);
+          setSubmitting(false);
+          return;
+        }
+      } else {
+        setWebcamStatus('Configuring host server camera device...');
       }
     }
 
-    // For RTSP / IP CAM: Enforce connection test before saving
+    // For RTSP / IP CAM: Test connection to stream source
+    let testFailureNotice: string | null = null;
     if (form.protocol === 'RTSP') {
       setWebcamStatus('Testing connection to camera stream...');
       try {
@@ -307,16 +406,10 @@ export const CameraList: React.FC = () => {
         });
         const testData = await testRes.json();
         if (!testRes.ok || testData.status === 'FAILED') {
-          setErrorMessage(testData.message || 'Cannot connect to stream host. Please verify phone IP and server state.');
-          setWebcamStatus(null);
-          setSubmitting(false);
-          return;
+          testFailureNotice = testData.message || 'Host unreachable';
         }
       } catch (testErr) {
-        setErrorMessage('Failed to reach stream host. Please check network connection.');
-        setWebcamStatus(null);
-        setSubmitting(false);
-        return;
+        testFailureNotice = 'Network connection failed to reach camera host';
       }
     }
 
@@ -332,7 +425,8 @@ export const CameraList: React.FC = () => {
           ...form,
           camera_id: cid,
           name: camName,
-          stream_url: urlToSave
+          stream_url: urlToSave,
+          role: form.role || (cameras.some(c => c.role === 'primary') ? 'secondary' : 'primary')
         })
       });
 
@@ -359,6 +453,15 @@ export const CameraList: React.FC = () => {
         return;
       }
 
+      // If browser webcam, start independent browser frame push stream
+      if (form.protocol === 'WEBCAM' && webcamMode === 'browser') {
+        try {
+          await browserCameraStreamManager.startCameraStream(cid, urlToSave);
+        } catch (streamErr: any) {
+          console.warn('Could not start independent browser camera session:', streamErr);
+        }
+      }
+
       // Automatically start stream ingestion for created camera
       const startRes = await fetch(`/api/cameras/${cid}/start`, {
         method: 'POST',
@@ -376,6 +479,10 @@ export const CameraList: React.FC = () => {
         fetchCameras();
         setSubmitting(false);
         return;
+      }
+
+      if (testFailureNotice) {
+        setErrorMessage(`CAMERA SAVED AS UNREACHABLE: ${testFailureNotice}. Background auto-reconnection is active and will begin streaming as soon as the camera is online.`);
       }
 
       setShowModal(false);
@@ -399,18 +506,33 @@ export const CameraList: React.FC = () => {
       setErrorMessage(null);
       setCameras(prev => prev.map(c => (c.camera_id === cameraId || c.id === cameraId) ? { ...c, status: 'CONNECTING' } : c));
       
+      const cam = cameras.find(c => c.camera_id === cameraId || c.id === cameraId);
+      if (cam && (cam.protocol === 'WEBCAM' || cam.protocol === 'BROWSER')) {
+        const diag = checkCameraApiSupport();
+        if (diag.supported) {
+          try {
+            await browserCameraStreamManager.startCameraStream(cam.camera_id, cam.stream_url || '');
+          } catch (e: any) {
+            const classified = classifyCameraError(e);
+            setErrorMessage(`${classified.title}: ${classified.message}`);
+          }
+        }
+      }
+
       const res = await fetch(`/api/cameras/${cameraId}/start`, {
         method: 'POST',
         headers: getAuthHeaders()
       });
+      const rawTxt = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(rawTxt); } catch (e) {}
+
       if (!res.ok) {
-        const text = await res.text();
-        let errMsg = text || res.statusText;
-        try {
-          const parsed = JSON.parse(text);
-          if (parsed.detail) errMsg = parsed.detail;
-        } catch(e) {}
-        setErrorMessage(`Failed to start camera ${cameraId}: ${errMsg}`);
+        setErrorMessage(`Failed to start camera ${cameraId}: ${data.detail || data.message || res.statusText}`);
+      } else if (data.status === 'unreachable') {
+        setErrorMessage(`CAMERA ${cameraId} UNREACHABLE: ${data.message || data.error}`);
+      } else if (data.status === 'error') {
+        setErrorMessage(data.message || data.error || `Failed to start camera ${cameraId}`);
       }
       fetchCameras();
     } catch (e: any) {
@@ -422,6 +544,7 @@ export const CameraList: React.FC = () => {
   const handleStopStream = async (cameraId: string) => {
     try {
       setErrorMessage(null);
+      browserCameraStreamManager.stopCameraStream(cameraId);
       setCameras(prev => prev.map(c => (c.camera_id === cameraId || c.id === cameraId) ? { ...c, status: 'STOPPED', fps: 0 } : c));
 
       const res = await fetch(`/api/cameras/${cameraId}/stop`, {
@@ -450,6 +573,7 @@ export const CameraList: React.FC = () => {
     if (!window.confirm(`Are you sure you want to delete camera ${cameraId}?`)) return;
     try {
       setErrorMessage(null);
+      browserCameraStreamManager.stopCameraStream(cameraId);
       await fetch(`/api/cameras/${cameraId}`, {
         method: 'DELETE',
         headers: getAuthHeaders()
@@ -459,6 +583,7 @@ export const CameraList: React.FC = () => {
       console.error(e);
     }
   };
+
 
   return (
     <div className="p-6 space-y-6">
@@ -471,14 +596,21 @@ export const CameraList: React.FC = () => {
         {user?.role === 'Administrator' && (
           <button
             onClick={() => {
+              const hasPrimary = cameras.some(c => c.role === 'primary');
+              const nextId = `CAM-${Date.now().toString().slice(-4)}`;
+              const usedDeviceIds = new Set(cameras.map(c => c.stream_url).filter(Boolean));
+              const unusedDevice = availableDevices.find(d => !usedDeviceIds.has(d.deviceId)) || availableDevices[0];
+              const defaultStreamUrl = unusedDevice ? unusedDevice.deviceId : '0';
+
               setForm({
-                camera_id: `CAM-${Date.now().toString().slice(-4)}`,
-                name: '',
+                camera_id: nextId,
+                name: unusedDevice ? unusedDevice.label : '',
                 description: '',
                 location: '',
                 protocol: 'WEBCAM',
-                stream_url: '0',
+                stream_url: defaultStreamUrl,
                 rotation: 0,
+                role: hasPrimary ? 'secondary' : 'primary',
                 latitude: 26.9124,
                 longitude: 70.9025
               });
@@ -511,14 +643,28 @@ export const CameraList: React.FC = () => {
       )}
 
       {testResult && (
-        <div className={`p-4 rounded-xl text-xs font-mono flex items-center justify-between border ${
+        <div className={`p-4 rounded-xl text-xs font-mono flex items-start justify-between border ${
           testResult.status === 'SUCCESS' ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300' : 'bg-red-950/40 border-red-500/40 text-red-300'
         }`}>
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-            <span>{testResult.message} Latency: {testResult.latency_ms}ms</span>
+          <div className="flex items-start gap-2.5">
+            {testResult.status === 'SUCCESS' ? (
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+            ) : (
+              <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-1">
+              <div className="font-bold uppercase tracking-wider text-[11px]">
+                {testResult.status === 'SUCCESS' ? 'CONNECTION SUCCESSFUL' : `CONNECTION FAILED (${testResult.error_type || 'ERROR'})`}
+              </div>
+              <div className="text-slate-200 whitespace-pre-line text-xs">{testResult.message}</div>
+              <div className="text-[11px] text-slate-400 pt-0.5">
+                {testResult.server_ip && <>Server IP: <span className="text-blue-400 font-bold">{testResult.server_ip}</span> | </>}
+                {testResult.camera_ip && <>Camera IP: <span className="text-amber-400 font-bold">{testResult.camera_ip}</span> | </>}
+                Latency: <span className="text-slate-200 font-bold">{testResult.latency_ms}ms</span>
+              </div>
+            </div>
           </div>
-          <button onClick={() => setTestResult(null)} className="text-slate-400 hover:text-white">✕</button>
+          <button onClick={() => setTestResult(null)} className="text-slate-400 hover:text-white p-1">✕</button>
         </div>
       )}
 
@@ -585,14 +731,22 @@ export const CameraList: React.FC = () => {
                   </td>
                   <td className="p-3">
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      c.status === 'ONLINE' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
-                      c.status === 'CONNECTING' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
+                      c.status === 'PLAYING' || (c.status === 'ONLINE' && c.fps > 0) ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
+                      c.status === 'PROCESSING' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 animate-pulse' :
+                      c.status === 'READY' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30' :
+                      c.status === 'COMPLETED' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' :
+                      c.status === 'FILE ERROR' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
+                      c.status === 'CONNECTING' ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' :
+                      c.status === 'RECONNECTING' ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 animate-pulse' :
+                      c.status === 'UNREACHABLE' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
+                      c.status === 'NO_FRAMES' || (c.status === 'ONLINE' && (!c.fps || c.fps === 0)) ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
+                      c.status === 'STOPPED' ? 'bg-slate-800 text-slate-400 border border-slate-700' :
                       'bg-slate-800 text-slate-400 border border-slate-700'
                     }`}>
-                      {c.status}
+                      {c.status === 'ONLINE' && (!c.fps || c.fps === 0) ? 'NO FRAMES' : c.status}
                     </span>
                   </td>
-                  <td className="p-3 text-slate-300">{c.fps}</td>
+                  <td className="p-3 text-slate-300 font-mono">{typeof c.fps === 'number' ? c.fps.toFixed(1) : (c.fps || '0.0')}</td>
                   <td className="p-3 flex items-center gap-2">
                     {c.role !== 'primary' && (
                       <button
@@ -609,7 +763,7 @@ export const CameraList: React.FC = () => {
                         SET PRIMARY
                       </button>
                     )}
-                    {c.status === 'ONLINE' || c.status === 'CONNECTING' ? (
+                    {c.status === 'ONLINE' || c.status === 'PLAYING' || c.status === 'PROCESSING' || c.status === 'CONNECTING' || c.status === 'RECONNECTING' || c.status === 'UNREACHABLE' ? (
                       <button
                         onClick={() => handleStopStream(c.camera_id)}
                         className="px-2.5 py-1 bg-red-950/40 hover:bg-red-600/30 text-red-300 border border-red-800/40 rounded text-[11px] font-semibold transition-colors flex items-center gap-1"
@@ -805,34 +959,170 @@ export const CameraList: React.FC = () => {
 
               {/* DYNAMIC SOURCE SPECIFIC FIELDS */}
               {form.protocol === 'WEBCAM' && (
-                <div className="p-3 bg-blue-950/30 border border-blue-500/30 rounded-lg space-y-2 text-blue-200 text-[11px]">
-                  <div className="font-bold flex items-center gap-1.5 text-blue-400">
-                    <Shield className="w-4 h-4" /> WEBCAM DEVICE CONFIGURATION
+                <div className="p-3 bg-blue-950/30 border border-blue-500/30 rounded-lg space-y-3 text-blue-200 text-[11px]">
+                  <div className="flex items-center justify-between">
+                    <div className="font-bold flex items-center gap-1.5 text-blue-400">
+                      <Shield className="w-4 h-4" /> WEBCAM CONFIGURATION
+                    </div>
+                    {/* Source Mode Switcher: Browser Device vs Host Server Hardware */}
+                    <div className="flex items-center gap-1 bg-[#0a0d14] p-0.5 rounded border border-[#252d42] text-[10px]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWebcamMode('browser');
+                          enumerateWebcams();
+                        }}
+                        className={`px-2 py-0.5 rounded font-bold transition-colors ${
+                          webcamMode === 'browser' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Browser Webcam
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWebcamMode('host');
+                          setForm(prev => ({ ...prev, stream_url: '0' }));
+                        }}
+                        className={`px-2 py-0.5 rounded font-bold transition-colors ${
+                          webcamMode === 'host' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Host Server Camera
+                      </button>
+                    </div>
                   </div>
-                  <div>
-                    <label className="text-slate-400 block mb-1">Select Available Hardware Device</label>
-                    {availableDevices.length > 0 ? (
+
+                  {/* If Browser Webcam Mode and Insecure Context (State A) */}
+                  {webcamMode === 'browser' && !apiDiagnostic.supported && (
+                    <div className="p-3 bg-amber-950/60 border border-amber-500/60 rounded-lg text-amber-200 space-y-2">
+                      <div className="flex items-start gap-2 font-bold text-amber-300">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                        <span>{apiDiagnostic.title}</span>
+                      </div>
+                      <p className="text-[10px] text-amber-200/90 leading-relaxed">
+                        {apiDiagnostic.message}
+                      </p>
+                      <div className="space-y-1 text-[10px] bg-slate-950/60 p-2 rounded border border-amber-500/20 font-mono">
+                        <strong className="text-white block uppercase mb-1">Recommended Solutions:</strong>
+                        {apiDiagnostic.remedies.map((rem, rIdx) => (
+                          <div key={rIdx} className="text-slate-300">• {rem}</div>
+                        ))}
+                      </div>
+                      <div className="pt-1 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setWebcamMode('host');
+                            setForm(prev => ({ ...prev, stream_url: '0' }));
+                          }}
+                          className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-[10px] font-bold uppercase transition-colors"
+                        >
+                          Use Host Server Camera Instead
+                        </button>
+                        {window.location.protocol === 'http:' && (
+                          <a
+                            href={`https://${window.location.hostname}:5173${window.location.pathname}`}
+                            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-blue-300 rounded text-[10px] font-bold uppercase transition-colors flex items-center gap-1"
+                          >
+                            <ExternalLink className="w-3 h-3" /> Switch to HTTPS
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Browser Webcam Selection (State E/Ready) */}
+                  {webcamMode === 'browser' && apiDiagnostic.supported && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-slate-400 block">Select Browser Camera Device</label>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              setWebcamStatus('Requesting browser camera permission...');
+                              const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                              stream.getTracks().forEach(t => t.stop());
+                              setWebcamStatus('Camera hardware enumerated successfully.');
+                              await enumerateWebcams();
+                            } catch (e: any) {
+                              const classified = classifyCameraError(e);
+                              setErrorMessage(`${classified.title}: ${classified.message}`);
+                            }
+                          }}
+                          className="text-[10px] text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-1"
+                        >
+                          <RefreshCw className="w-3 h-3" /> Refresh / Grant Permission
+                        </button>
+                      </div>
+
+                      {availableDevices.length > 0 ? (
+                        <select
+                          value={form.stream_url}
+                          onChange={(e) => {
+                            const devId = e.target.value;
+                            const found = availableDevices.find(d => d.deviceId === devId);
+                            setForm(prev => ({
+                              ...prev,
+                              stream_url: devId,
+                              name: prev.name || (found ? found.label : '')
+                            }));
+                          }}
+                          className="w-full bg-[#0a0d14] border border-[#252d42] rounded p-2 text-slate-200 font-mono focus:border-blue-500 outline-none"
+                        >
+                          {availableDevices.map((dev) => (
+                            <option key={dev.deviceId || dev.index} value={dev.deviceId || String(dev.index)}>
+                              {dev.label} {dev.deviceId ? `(${dev.deviceId.slice(0, 8)}...)` : `(Index ${dev.index})`}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="p-2.5 bg-slate-900/80 border border-[#252d42] rounded text-[11px] text-slate-400 space-y-2">
+                          <p>No browser cameras enumerated yet. Click below to grant camera permission and detect available devices.</p>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                                stream.getTracks().forEach(t => t.stop());
+                                await enumerateWebcams();
+                              } catch (e: any) {
+                                const classified = classifyCameraError(e);
+                                setErrorMessage(`${classified.title}: ${classified.message}`);
+                              }
+                            }}
+                            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold uppercase transition-colors"
+                          >
+                            Grant Camera Access & Detect Devices
+                          </button>
+                        </div>
+                      )}
+                      <p className="text-[10px] text-slate-400">
+                        This camera will stream via its own dedicated browser session directly to the AI surveillance engine.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Host Server Camera Selection */}
+                  {webcamMode === 'host' && (
+                    <div className="space-y-2">
+                      <label className="text-slate-400 block">Server Video Device Index</label>
                       <select
                         value={form.stream_url}
-                        onChange={(e) => setForm({ ...form, stream_url: e.target.value })}
+                        onChange={(e) => setForm(prev => ({ ...prev, stream_url: e.target.value }))}
                         className="w-full bg-[#0a0d14] border border-[#252d42] rounded p-2 text-slate-200 font-mono focus:border-blue-500 outline-none"
                       >
-                        {availableDevices.map((dev) => (
-                          <option key={dev.deviceId || dev.index} value={String(dev.index)}>
-                            {dev.label} (Index {dev.index})
-                          </option>
-                        ))}
+                        <option value="0">Device 0 (Primary Host Camera / Built-in FaceTime HD)</option>
+                        <option value="1">Device 1 (Secondary USB Video Camera)</option>
+                        <option value="2">Device 2 (Tertiary Video Capture Device)</option>
+                        <option value="3">Device 3 (Auxiliary Video Device)</option>
                       </select>
-                    ) : (
-                      <input
-                        type="text"
-                        value={form.stream_url}
-                        onChange={(e) => setForm({ ...form, stream_url: e.target.value })}
-                        className="w-full bg-[#0a0d14] border border-[#252d42] rounded p-2 text-slate-200 font-mono focus:border-blue-500 outline-none"
-                        placeholder="0 for default camera, 1 for secondary USB camera"
-                      />
-                    )}
-                  </div>
+                      <p className="text-[10px] text-slate-400">
+                        Ingested server-side via OpenCV hardware capture on the IBVAP host computer. Does not require browser camera permission.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1007,9 +1297,16 @@ export const CameraList: React.FC = () => {
                           </div>
                         </div>
                       ) : (
-                        <p className="text-[11px] text-rose-300/90 leading-relaxed pt-1 border-t border-rose-500/20">
-                          {testResult.error || testResult.message}
-                        </p>
+                        <div className="pt-1 border-t border-rose-500/20 space-y-1">
+                          <p className="text-[11px] text-rose-300 leading-relaxed whitespace-pre-line">
+                            {testResult.error || testResult.message}
+                          </p>
+                          {testResult.server_ip && testResult.camera_ip && (
+                            <p className="text-[10px] text-rose-400 font-mono">
+                              Server IP: {testResult.server_ip} | Camera IP: {testResult.camera_ip}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                   )}
@@ -1017,19 +1314,100 @@ export const CameraList: React.FC = () => {
               )}
 
               {form.protocol === 'MP4' && (
-                <div className="space-y-2 p-3 bg-slate-900/50 border border-[#252d42] rounded-lg">
-                  <label className="text-slate-400 block mb-1">MP4 Video File Path / URL</label>
-                  <input
-                    type="text"
-                    required
-                    value={form.stream_url}
-                    onChange={(e) => setForm({ ...form, stream_url: e.target.value })}
-                    className="w-full bg-[#0a0d14] border border-[#252d42] rounded p-2 text-slate-200 font-mono focus:border-blue-500 outline-none"
-                    placeholder="storage/demo_videos/border_patrol.mp4"
-                  />
-                  <p className="text-[10px] text-slate-500">
-                    Video frames will feed the real AI detection and security inference pipeline.
-                  </p>
+                <div className="space-y-3 p-3 bg-slate-900/50 border border-[#252d42] rounded-lg">
+                  <div>
+                    <label className="text-slate-300 font-semibold block mb-1 text-xs uppercase tracking-wider">
+                      SELECT MP4 VIDEO FILE FROM COMPUTER
+                    </label>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      accept=".mp4,video/mp4"
+                      onChange={handleMp4FileUpload}
+                      className="hidden"
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploadingMp4}
+                        className="px-3 py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/40 rounded text-xs font-bold tracking-wider uppercase transition-colors flex items-center gap-2 disabled:opacity-50"
+                      >
+                        {uploadingMp4 ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>UPLOADING & VERIFYING VIDEO...</span>
+                          </>
+                        ) : (
+                          <>
+                            <UploadCloud className="w-3.5 h-3.5" />
+                            <span>CHOOSE .MP4 FILE</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleTestConnection}
+                        disabled={testing || uploadingMp4 || !form.stream_url}
+                        className="px-3 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/40 rounded text-xs font-bold tracking-wider uppercase transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {testing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                        <span>TEST SOURCE</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {uploadedMp4Info && (
+                    <div className="p-2.5 bg-emerald-950/30 border border-emerald-500/30 rounded text-xs space-y-1">
+                      <div className="flex items-center justify-between text-emerald-300 font-bold">
+                        <span className="flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" /> VERIFIED MP4 VIDEO
+                        </span>
+                        <span className="font-mono text-[11px] text-emerald-400">STATUS: READY</span>
+                      </div>
+                      <p className="text-slate-300 font-mono text-[11px] truncate">
+                        File: <strong>{uploadedMp4Info.filename}</strong> ({(uploadedMp4Info.size_bytes / (1024 * 1024)).toFixed(2)} MB)
+                      </p>
+                      <p className="text-slate-400 font-mono text-[10px]">
+                        Resolution: {uploadedMp4Info.width}x{uploadedMp4Info.height} | FPS: {uploadedMp4Info.fps.toFixed(1)} | Duration: {uploadedMp4Info.duration_sec}s
+                      </p>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="text-slate-400 block mb-1 text-[11px]">
+                      Or Enter Local Server Video Path / URL
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={form.stream_url}
+                      onChange={(e) => {
+                        let v = e.target.value;
+                        if ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"'))) {
+                          v = v.slice(1, -1).trim();
+                        }
+                        setForm({ ...form, stream_url: v });
+                      }}
+                      className="w-full bg-[#0a0d14] border border-[#252d42] rounded p-2 text-slate-200 font-mono text-xs focus:border-blue-500 outline-none"
+                      placeholder="storage/demo_videos/border_patrol.mp4"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Actual MP4 frames feed the real AI detection and security inference pipeline.
+                    </p>
+                  </div>
+
+                  {testResult && testResult.source_type === 'mp4' && (
+                    <div className={`p-2.5 rounded border text-xs font-mono space-y-1 ${
+                      testResult.status === 'SUCCESS' ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300' : 'bg-rose-950/30 border-rose-500/30 text-rose-300'
+                    }`}>
+                      <div className="flex items-center justify-between font-bold">
+                        <span>{testResult.status === 'SUCCESS' ? '✓ FILE VERIFIED (READY)' : '✗ FILE ERROR'}</span>
+                        {testResult.fps > 0 && <span>{testResult.fps.toFixed(1)} FPS</span>}
+                      </div>
+                      <p className="text-[11px] leading-relaxed">{testResult.message}</p>
+                    </div>
+                  )}
                 </div>
               )}
 

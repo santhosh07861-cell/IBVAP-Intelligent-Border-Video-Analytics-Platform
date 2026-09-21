@@ -143,10 +143,26 @@ class FaceTracker:
     """
     Per-camera multi-object face tracker with spatial IoU matching and confirmation filtering.
     """
-    def __init__(self, confirmation_frames: int = FACE_TRACK_CONFIRMATION_FRAMES, max_disappeared: int = FACE_TRACK_MAX_DISAPPEARED):
+    def __init__(
+        self,
+        confirmation_frames: int = FACE_TRACK_CONFIRMATION_FRAMES,
+        max_disappeared: int = FACE_TRACK_MAX_DISAPPEARED,
+        camera_id: Optional[str] = None,
+        base_track_id: Optional[int] = None
+    ):
         self.confirmation_frames = confirmation_frames
         self.max_disappeared = max_disappeared
-        self.next_track_id = 101
+        self.camera_id = camera_id
+        if base_track_id is not None:
+            self.next_track_id = int(base_track_id)
+        elif camera_id:
+            try:
+                from ai_engine.tracking.tracker import compute_camera_track_base
+                self.next_track_id = compute_camera_track_base(camera_id)
+            except Exception:
+                self.next_track_id = 101
+        else:
+            self.next_track_id = 101
         self.tracks: Dict[int, FaceTrack] = {}
 
     def update(self, detections: List[DetectedFace]) -> List[FaceTrack]:
@@ -299,7 +315,7 @@ class RealFaceEngine:
         contrast_score = min(1.0, std_lum / 35.0)
 
         overall_quality = 0.35 * size_score + 0.35 * blur_score + 0.15 * lum_score + 0.15 * contrast_score
-        is_good = overall_quality >= self.min_quality and blur_score >= 0.25
+        is_good = overall_quality >= self.min_quality and blur_score >= 0.10
 
         details = {
             "size": (fw, fh),
@@ -515,13 +531,16 @@ class RealFaceEngine:
         Evaluates recognition for a FaceTrack using interval caching and multi-frame temporal confirmation.
         """
         now = time.time()
-        # Reuse cached recognition if within cache interval
-        if now - track.last_recognition_time < FACE_RECOGNITION_INTERVAL_SEC and track.last_recognition_time > 0:
+        # Reuse cached recognition if already confirmed and within cache interval
+        # (prevents re-extracting heavy SFace embeddings on every frame on CPU)
+        if track.recognition_status == "KNOWN" and (now - track.last_recognition_time < FACE_RECOGNITION_INTERVAL_SEC) and track.last_recognition_time > 0:
+            return track
+        if track.recognition_status == "UNKNOWN" and getattr(track, "_unknown_eval_count", 0) >= 2 and (now - track.last_recognition_time < FACE_RECOGNITION_INTERVAL_SEC):
             return track
 
         track.last_recognition_time = now
 
-        if not track.is_high_quality:
+        if not track.is_high_quality and track.quality_score < 0.28:
             track.recognition_status = "UNCERTAIN"
             track.recognition_confidence = 0.0
             track.raw_similarity = 0.0
@@ -548,9 +567,9 @@ class RealFaceEngine:
                 )
 
                 # Require WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES consecutive
-                # high-quality frames before accepting a watchlist match.
-                # This prevents single-frame false positives from triggering alerts.
-                if track.consecutive_match_count >= WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES:
+                # high-quality frames OR a strong decisive match (raw_sc >= 0.40)
+                # before confirming watchlist match.
+                if track.consecutive_match_count >= WATCHLIST_RECOGNITION_CONFIRMATION_FRAMES or raw_sc >= 0.40:
                     track.recognition_status = "KNOWN"
                     track.identity_id = id_id
                     track.identity_name = id_name
@@ -569,6 +588,7 @@ class RealFaceEngine:
                     track.raw_similarity = raw_sc
             else:
                 track.recognition_status = status
+                track._unknown_eval_count = getattr(track, "_unknown_eval_count", 0) + 1
                 track.identity_id = id_id if status == "UNCERTAIN" else None
                 track.identity_name = id_name if status == "UNCERTAIN" else None
                 track.person_id = p_badge if status == "UNCERTAIN" else None

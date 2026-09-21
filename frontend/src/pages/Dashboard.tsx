@@ -81,10 +81,17 @@ export const Dashboard: React.FC = () => {
   }, [lastAlert]);
 
   const primaryTelemetry = getCameraTelemetry(primaryCamera?.camera_id);
-  const primaryOnline = primaryCamera && (primaryCamera.status === 'ONLINE' || (primaryTelemetry?.fps && primaryTelemetry.fps > 0));
+  const primaryOnline = Boolean(
+    primaryCamera &&
+    ((primaryTelemetry?.fps && primaryTelemetry.fps > 0) || (primaryCamera.status === 'ONLINE' && (primaryCamera.fps || 0) > 0))
+  );
 
   const totalCameras = cameras.length;
-  const onlineCameras = cameras.filter(c => c.status === 'ONLINE' || (getCameraTelemetry(c.camera_id)?.fps || 0) > 0).length;
+  const onlineCameras = cameras.filter(c => {
+    const telemFps = getCameraTelemetry(c.camera_id)?.fps || 0;
+    const dbFps = c.fps || 0;
+    return (telemFps > 0 || dbFps > 0) && (c.status === 'ONLINE' || telemFps > 0);
+  }).length;
 
   return (
     <div className="p-6 space-y-6">
@@ -251,12 +258,14 @@ export const Dashboard: React.FC = () => {
           <LiveVideoCanvas
             cameraId={primaryCamera?.camera_id}
             cameraName={primaryCamera?.name || "PRIMARY BORDER FEED"}
+            status={primaryTelemetry?.status || primaryCamera?.status}
             detections={primaryTelemetry?.detections || []}
             faces={primaryTelemetry?.faces || []}
             fps={primaryOnline ? (primaryTelemetry?.fps || 0.0) : 0.0}
             latencyMs={primaryTelemetry?.latency_ms || 0.0}
             inferenceMode={primaryOnline ? (primaryTelemetry?.inference_mode || 'REAL AI | INFERENCE RUNNING') : 'CAMERA OFFLINE'}
             cameraRole="primary"
+            protocol={primaryCamera?.protocol}
             rotation={primaryCamera?.rotation || 0}
             onRotate={async (r) => {
               if (primaryCamera) {

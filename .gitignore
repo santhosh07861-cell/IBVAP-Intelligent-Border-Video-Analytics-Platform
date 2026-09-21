@@ -64,14 +64,17 @@ scratch/
 
 # Storage uploads / temporary snapshot evidence (keep folder structure)
 storage/uploads/*
+storage/mp4_videos/*
 storage/evidence/snapshots/*
 storage/evidence/face/snapshots/*
 storage/evidence/face/crops/*
 storage/evidence/face/watchlist/*
 storage/evidence/anpr/*
 storage/evidence/detections/*
+storage/evidence/test_mobile.jpg
 storage/test_face_subject.jpg
 !storage/uploads/.gitkeep
+!storage/mp4_videos/.gitkeep
 !storage/evidence/snapshots/.gitkeep
 !storage/evidence/face/snapshots/.gitkeep
 !storage/evidence/face/crops/.gitkeep
@@ -81,4 +84,5 @@ storage/test_face_subject.jpg
 
 # Agent brain / conversation artifacts
 brain/
+
 
